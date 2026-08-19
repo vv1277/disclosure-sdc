@@ -1,0 +1,19 @@
+# Phase 0 (pre-flight diagnostics) minimum set.
+# Subset of the recommended stack in Appendix A.2 of the research plan.
+# NOTE: kept ASCII-only on purpose -- pip decodes this file with the system
+# locale codec (cp949 on Korean Windows), so non-ASCII comments break install.
+pandas>=2.2
+pyarrow>=16.0
+numpy>=1.26
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2
+scikit-learn>=1.5
+rapidfuzz>=3.9
+datasketch>=1.6
+matplotlib>=3.9
+PyYAML>=6.0
+python-dotenv>=1.0
+tqdm>=4.66
+tabulate>=0.9
+pytest>=8.2

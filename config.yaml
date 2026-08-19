@@ -1,0 +1,107 @@
+# =====================================================================
+# 전역 설정 — Phase 0 (사전 진단)
+# 부록 A.3: 모든 난수 시드는 여기에 고정하고, 스크립트 시작 시 로그에 찍는다.
+# =====================================================================
+
+project: disclosure-sdc
+phase: 0
+
+seed: 20260820
+
+paths:
+  raw: data/raw            # 원본 ZIP 캐시 (gitignore)
+  pilot: data/pilot        # Phase 0 산출물
+  pilot_mock: data/pilot_mock   # --mock 실행 시 산출물 (실데이터와 절대 섞지 않는다)
+
+api:
+  # OpenDART 인증키는 코드에 넣지 않는다. 환경변수 OPENDART_KEY 또는 .env 에서 읽는다.
+  # TODO(API): 키 발급 후 .env.example -> .env 복사 후 값만 채우면 된다.
+  key_env: OPENDART_KEY
+  base_url: https://opendart.fss.or.kr/api
+  sleep_sec: 0.3           # 호출 사이 대기
+  max_retries: 3           # 실패 시 지수 백오프 재시도 횟수
+  backoff_base_sec: 1.0
+  timeout_sec: 30
+  daily_limit: 20000       # 참고용. 초과 시 OpenDART가 020 에러를 반환한다.
+
+sample:
+  fiscal_years: [2016, 2020, 2024]
+  report_name_include: ["사업보고서"]
+  report_name_exclude: ["분기보고서", "반기보고서", "분기", "반기"]
+  # 정정보고서는 별도 플래그(is_amendment)로 표시하되 원본을 우선 사용한다.
+  prefer_original_over_amendment: true
+
+# ---------------------------------------------------------------------
+# 진단 대상 4개 섹션 (0.1 D1)
+# 중요: 섹션 번호(로마숫자)는 연도마다 바뀐다. 번호가 아니라 '이름'으로 매칭한다.
+# ---------------------------------------------------------------------
+sections:
+  S1:
+    name: "사업의 내용"
+    aliases: ["사업의 내용", "사업의내용"]
+  S2:
+    name: "이사의 경영진단 및 분석의견"
+    aliases: ["이사의 경영진단 및 분석의견", "경영진단 및 분석의견"]
+  S3:
+    name: "그 밖에 투자자 보호를 위하여 필요한 사항"
+    aliases: ["그 밖에 투자자 보호를 위하여 필요한 사항", "그밖에 투자자보호를 위하여 필요한 사항"]
+  S4:
+    name: "임원 및 직원 등에 관한 사항"
+    aliases: ["임원 및 직원 등에 관한 사항", "임원 및 직원에 관한 사항"]
+
+# Gate 0 통과 조건 (문서 'Gate 0 — 통과 조건')
+gate0:
+  parse_success_rate_min: 0.85
+  s1_mean_chars_min: 5000
+  s2_drop_threshold_chars: 2000     # 미만이면 MVP 섹션에서 제외 확정
+  section_mean_chars_min: 2000      # D1 일반 기준
+  change_rate_median_min: 0.05      # D1 변화율 기준
+  parse_rate_reset_period: 0.70     # 미만이면 표본 시작연도를 2018년으로 올린다
+
+# P0-b 스파이크/공통문단 진단 파라미터
+change:
+  tfidf_char_ngram: [2, 2]          # 한국어: 형태소 분석 없이 문자 2-gram
+  minhash_num_perm: 128
+  minhash_ngram: 3                  # 문자 3-gram
+  minhash_threshold: 0.8
+  top_pairs: 20                     # 리포트에 표시할 상위 쌍 수
+  max_pairs_stored: 500             # (섹션 x 연도쌍)당 CSV로 저장할 최대 쌍 수.
+                                    # 서식개정 연도에는 쌍이 수만 개까지 나온다.
+  min_paragraph_chars: 30           # 너무 짧은 문단은 공통문단 탐지에서 제외
+
+# ---------------------------------------------------------------------
+# 표본: 무작위 30개 기업 (KOSPI 15 + KOSDAQ 15, 시가총액 층화)
+# NOTE: 아래 리스트는 Phase 0 파일럿용 임의 추출본이다. Phase 1에서
+#       pykrx 기반 층화 무작위 추출로 교체한다 (seed 고정).
+# ---------------------------------------------------------------------
+universe:
+  - {stock_code: "005930", name: "삼성전자",           market: KOSPI,  size_tier: large}
+  - {stock_code: "000660", name: "SK하이닉스",          market: KOSPI,  size_tier: large}
+  - {stock_code: "005380", name: "현대차",             market: KOSPI,  size_tier: large}
+  - {stock_code: "051910", name: "LG화학",             market: KOSPI,  size_tier: large}
+  - {stock_code: "035420", name: "NAVER",              market: KOSPI,  size_tier: large}
+  - {stock_code: "012330", name: "현대모비스",          market: KOSPI,  size_tier: mid}
+  - {stock_code: "015760", name: "한국전력",            market: KOSPI,  size_tier: mid}
+  - {stock_code: "034020", name: "두산에너빌리티",       market: KOSPI,  size_tier: mid}
+  - {stock_code: "010950", name: "S-Oil",              market: KOSPI,  size_tier: mid}
+  - {stock_code: "004020", name: "현대제철",            market: KOSPI,  size_tier: mid}
+  - {stock_code: "006800", name: "미래에셋증권",         market: KOSPI,  size_tier: mid}
+  - {stock_code: "001450", name: "현대해상",            market: KOSPI,  size_tier: small}
+  - {stock_code: "007070", name: "GS리테일",           market: KOSPI,  size_tier: small}
+  - {stock_code: "002790", name: "아모레G",            market: KOSPI,  size_tier: small}
+  - {stock_code: "011790", name: "SKC",               market: KOSPI,  size_tier: small}
+  - {stock_code: "247540", name: "에코프로비엠",         market: KOSDAQ, size_tier: large}
+  - {stock_code: "086520", name: "에코프로",            market: KOSDAQ, size_tier: large}
+  - {stock_code: "196170", name: "알테오젠",            market: KOSDAQ, size_tier: large}
+  - {stock_code: "035760", name: "CJ ENM",            market: KOSDAQ, size_tier: large}
+  - {stock_code: "058470", name: "리노공업",            market: KOSDAQ, size_tier: mid}
+  - {stock_code: "240810", name: "원익IPS",            market: KOSDAQ, size_tier: mid}
+  - {stock_code: "095340", name: "ISC",               market: KOSDAQ, size_tier: mid}
+  - {stock_code: "214150", name: "클래시스",            market: KOSDAQ, size_tier: mid}
+  - {stock_code: "214450", name: "파마리서치",           market: KOSDAQ, size_tier: mid}
+  - {stock_code: "067310", name: "하나마이크론",         market: KOSDAQ, size_tier: small}
+  - {stock_code: "036930", name: "주성엔지니어링",       market: KOSDAQ, size_tier: small}
+  - {stock_code: "078600", name: "대주전자재료",         market: KOSDAQ, size_tier: small}
+  - {stock_code: "034230", name: "파라다이스",           market: KOSDAQ, size_tier: small}
+  - {stock_code: "122870", name: "와이지엔터테인먼트",    market: KOSDAQ, size_tier: small}
+  - {stock_code: "041510", name: "에스엠",              market: KOSDAQ, size_tier: small}

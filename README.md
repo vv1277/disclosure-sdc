@@ -1,0 +1,203 @@
+# disclosure-sdc
+
+한국 기업공시의 Semantic Change와 정량모형 대비 Incremental Information
+— 연구 실행 계획서의 **Phase 0 (사전 진단)** 구현체.
+
+> 현재 구현 범위는 Phase 0 뿐이다. Phase 1~9는 아직 비어 있다.
+> Gate 0을 통과하기 전에는 다음 Phase로 넘어가지 않는다.
+
+---
+
+## 1. 지금 상태 한 줄 요약
+
+Phase 0 파이프라인(P0, P0-b)이 코드·테스트·리포트 생성까지 완성되어 있고,
+**OpenDART 인증키만 꽂으면 곧바로 실데이터로 돌아간다.**
+키가 아직 없으므로 `--mock`(합성 공시) 모드로 전 구간을 검증해 두었다.
+
+---
+
+## 2. API 키 — 나중에 넣을 자리
+
+키는 코드나 `config.yaml` 어디에도 하드코딩하지 않는다. **단 한 곳만 채우면 된다.**
+
+```bash
+cp .env.example .env
+# .env 를 열어 OPENDART_KEY=... 한 줄만 채운다
+```
+
+| 항목 | 위치 | 상태 |
+|---|---|---|
+| OpenDART 인증키 | `.env` 의 `OPENDART_KEY` | **미발급 — 발급 후 채울 것** (opendart.fss.or.kr, 일 20,000건) |
+| LLM API 키 | `.env` 의 `LLM_API_KEY` | Phase 6에서만 필요. Phase 0~5는 비용 0원 |
+
+키를 읽는 코드는 [src/collect/dart_client.py](src/collect/dart_client.py) 의
+`load_api_key()` 하나뿐이다. 키가 없으면 `MissingApiKey` 를 던지고
+`--mock` 으로 실행하라는 안내를 출력한다. **소스 수정은 필요 없다.**
+
+---
+
+## 3. 설치
+
+```bash
+python -m venv .venv && .venv/Scripts/activate    # Windows
+pip install -r requirements.txt
+```
+
+## 4. 실행
+
+```bash
+python -m src.pilot.p0_diagnostics --mock
+```
+
+```bash
+python -m src.pilot.p0b_change_diagnostics --mock
+```
+
+키 발급 후에는 `--mock` 을 떼고 돌린다. 부록 B.1 원칙대로 먼저 소규모로:
+
+```bash
+python -m src.pilot.p0_diagnostics --limit 3
+```
+
+```bash
+python -m src.pilot.p0_diagnostics
+```
+
+```bash
+python -m src.pilot.p0b_change_diagnostics
+```
+
+테스트:
+
+```bash
+python -m pytest tests -q
+```
+
+---
+
+## 5. 무엇을 진단하는가 (0.1 D1·D2·D3)
+
+| # | 진단 항목 | 통과 기준 | 구현 |
+|---|---|---|---|
+| D1 | 4개 후보 섹션의 문자 수 및 전년 대비 변화율 | 섹션 평균 2,000자 이상, 변화율 중앙값 5% 이상 | `p0_diagnostics` (문자 수) + `p0b_change_diagnostics` (변화율) |
+| D2 | 연도별 평균 텍스트 변화율의 공통 스파이크 | 스파이크가 관측되면 정상 | `p0b_change_diagnostics` 2·3절 |
+| D3 | 사업보고서 파싱 성공률 | 85% 이상 | `p0_diagnostics` 2절 |
+
+대상 4개 섹션 (`config.yaml` 의 `sections`):
+
+| id | 섹션명 |
+|---|---|
+| S1 | 사업의 내용 |
+| S2 | 이사의 경영진단 및 분석의견 |
+| S3 | 그 밖에 투자자 보호를 위하여 필요한 사항 |
+| S4 | 임원 및 직원 등에 관한 사항 |
+
+### 섹션 매칭 원칙
+
+**섹션 번호(로마숫자)는 연도마다 바뀌므로 번호가 아니라 이름으로 매칭한다.**
+`src/parse/sections.py` 는
+
+1. HTML을 블록 시퀀스로 평탄화하고 (표는 별도 블록),
+2. 표기 변형(공백·중점·괄호·앞머리 번호)을 제거한 정규형으로 최상위 섹션 헤더를 찾고,
+3. 섹션의 끝을 **다음 최상위 헤더**로 정하며,
+4. 같은 이름이 목차(TOC)와 본문에 둘 다 나오면 **본문 길이가 긴 쪽**을 택한다.
+
+이 네 가지는 전부 `tests/test_sections.py` 에 회귀 테스트로 고정되어 있다.
+
+---
+
+## 6. 산출물
+
+`--mock` 실행 시 `data/pilot_mock/`, 실데이터는 `data/pilot/` 에 쌓인다.
+
+| 파일 | 내용 |
+|---|---|
+| `report.md` | P0 진단 리포트 (섹션별 문자 수, 파싱 성공률, 실패 원인, Gate 0 체크리스트) |
+| `diagnostics.csv` | `corp_code, corp_name, fy, section, char_len_text, char_len_table, n_paragraphs, parse_ok` |
+| `reports_index.csv` | (기업, 회계연도) → `rcept_no` 매핑, 정정보고서 플래그 |
+| `sections/{corp}_{fy}_{S#}.txt` | 표를 뺀 섹션 본문 |
+| `tables/{corp}_{fy}_{S#}.html` | 섹션에서 떼어낸 표 |
+| `failures.csv` | 단계별 실패 로그 (부록 B.2) |
+| `change_rates.csv` | 인접 연도쌍 유사도 3종 + 변화율 |
+| `change_diagnostics.md` | P0-b 리포트 |
+| `common_paragraphs.csv` | 기업 간 거의 동일한 변경 문단 쌍 |
+| `fig1_change_by_year.png` | 연도별 평균 변화율 (섹션별 라인) |
+| `fig2_common_paragraphs.png` | 기업 간 공통 변경 문단 수 (연도별 바) |
+
+원본 ZIP은 `data/raw/{rcept_no}.zip` 에 캐시되며 재실행 시 다시 받지 않는다.
+`data/` 와 `results/` 는 전부 gitignore 대상이다 (부록 A.2).
+
+---
+
+## 7. Gate 0 통과 조건
+
+```
+□ 파싱 성공률 85% 이상
+□ S1(사업의 내용) 평균 5,000자 이상
+□ S2(경영진단)가 2,000자 미만이면 → MVP 섹션에서 제외 확정
+□ 기업 간 공통 변경 문단이 실제로 관측됨 → Phase 5 필요성 확인
+```
+
+미달 시: 섹션 목록을 재확정하고 Phase 2 설계를 수정한 뒤 진행.
+파싱 성공률이 70% 미만이면 표본 시작연도를 2018년으로 올린다.
+판정 로직과 임계값은 전부 `config.yaml` 의 `gate0` 에 있다.
+
+---
+
+## 8. 표본 30개 기업
+
+`config.yaml` 의 `universe` 에 KOSPI 15 + KOSDAQ 15가 시가총액 층화로 하드코딩되어 있다.
+
+> **주의.** 이 30개는 Phase 0 파일럿용 **임의 추출본**이다. 정식 층화 무작위
+> 추출(pykrx 기반, 시드 고정)은 Phase 1에서 수행하고 이 리스트를 교체한다.
+
+---
+
+## 9. 알려진 한계 — 3개 연도 표본에서 D2 스파이크 검정은 검정력이 없다
+
+계획서는 "기업별 변화율을 기업 평균으로 표준화한 뒤 연도 평균을 보라"고 한다.
+그런데 표본이 2016/2020/2024 **3개 연도**이면 기업당 인접 연도쌍이 **2개**뿐이라,
+기업 평균으로 demean 한 두 값은 부호만 반대인 같은 크기가 되어 서로 상쇄된다.
+게다가 2020년에 삽입된 서식 문구는 `2016→2020`(추가)과 `2020→2024`(삭제)의
+변화율을 **동시에** 끌어올린다.
+
+따라서 D2 판정은 **3절(기업 간 공통 변경 문단, MinHash)** 을 1차 근거로 삼는다.
+demean 기반 스파이크 검정은 Phase 1에서 연속 연도 패널을 확보한 뒤 다시 수행한다.
+`change_diagnostics.md` 는 이 조건이 걸리면 리포트 안에 경고를 자동으로 찍는다.
+
+---
+
+## 10. 디렉토리 (부록 A.1)
+
+```
+disclosure-sdc/
+  README.md
+  config.yaml              전역 설정 (표본, 기간, 시드, Gate 임계값)
+  requirements.txt
+  .env.example             OPENDART_KEY, LLM_API_KEY
+  src/
+    collect/               Phase 1  — dart_client, corp_code, report_select
+    parse/                 Phase 2  — body, sections
+    pilot/                 Phase 0  — p0_diagnostics, p0b_change_diagnostics,
+                                      similarity, mock_source
+    utils/                 공통     — config, logging, failures, textnorm, plotting
+    features/ model/ diff/ template/ llm/ validation/ experiments/ mechanism/
+                           (Phase 3~9, 아직 비어 있음)
+  data/                    raw/ pilot/ corpus/ ... (gitignore)
+  results/                 (gitignore)
+  tests/
+```
+
+## 11. 재현성 (부록 A.3)
+
+- 모든 난수 시드는 `config.yaml` 의 `seed` 에서 오고, 스크립트 시작 시 로그에 찍힌다.
+- 중간 산출물은 전부 파일로 남긴다.
+- 각 Phase는 재실행 가능(idempotent)하다. 이미 받은 ZIP은 다시 받지 않는다.
+- 개별 실패가 전체를 중단시키지 않고 `failures.csv` 에 쌓인다.
+
+## 12. 다음 단계
+
+1. OpenDART 키 발급 → `.env` 에 기입
+2. `python -m src.pilot.p0_diagnostics --limit 3` 로 실데이터 소규모 시운전
+3. 전체 30개 실행 → `data/pilot/report.md` 로 Gate 0 판정
+4. 통과 시 Phase 1(데이터 인프라)로, 미달 시 섹션 목록 재확정
