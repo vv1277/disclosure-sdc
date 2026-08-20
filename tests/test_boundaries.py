@@ -222,3 +222,29 @@ def test_arabic_subheading_still_not_a_section_start():
     blocks = iter_blocks(SUBHEADING_DOC)
     starts = [t for _, _, t in find_headers(blocks)]
     assert "1. 회사의 개요" not in starts
+
+
+# ---------------------------------------------------------------------------
+# 파싱 캐시 무효화 — 파싱 경로 모듈이 바뀌면 지문이 바뀌어야 한다
+# ---------------------------------------------------------------------------
+
+def test_parser_fingerprint_covers_whole_parse_path(tmp_path, monkeypatch):
+    """지문 계산에 파싱 경로 모듈이 전부 들어 있어야 한다.
+
+    textnorm 이 빠져 있어 clean_text() 수정이 캐시에 반영되지 않은 사고가 있었다.
+    """
+    import src.pilot.parse_cache as pc
+
+    before = pc.parser_fingerprint()
+
+    # textnorm 소스가 바뀐 상황을 흉내낸다
+    fake = tmp_path / "textnorm_modified.py"
+    fake.write_text("# 내용이 달라진 파일\n", encoding="utf-8")
+    monkeypatch.setattr(pc.textnorm, "__file__", str(fake))
+
+    assert pc.parser_fingerprint() != before, "textnorm 변경이 지문에 반영되지 않는다"
+
+
+def test_parser_fingerprint_is_stable_without_changes():
+    import src.pilot.parse_cache as pc
+    assert pc.parser_fingerprint() == pc.parser_fingerprint()

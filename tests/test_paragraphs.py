@@ -97,3 +97,59 @@ def test_paragraph_stats_counts_short_paragraphs():
 def test_paragraph_stats_empty():
     st = paragraph_stats([])
     assert st.n == 0 and st.mean == 0 and st.share_under_10 == 0
+
+
+# ---------------------------------------------------------------------------
+# P0-d Part A — 오염 지표는 문자 수 기준이어야 분모 효과에 흔들리지 않는다
+# ---------------------------------------------------------------------------
+
+def test_char_based_contamination_is_stable_under_paragraph_merging():
+    """같은 오염량이면 문단 병합 여부와 무관하게 문자 기준 비중은 같아야 한다.
+
+    문단 수 기준은 병합으로 분모가 줄어 값이 튄다 — 이것이 P0-c 에서
+    S1 오염 비중이 0.45% -> 0.59% 로 '증가'해 보인 착시의 원인이다.
+    """
+    from src.pilot.p0c_boundary_audit import contamination
+
+    clean = "정상적인 사업 서술 문단입니다. 충분히 깁니다."
+    dirty = "기대신용손실 모형이 적용되는 금융자산을 보유하고 있습니다."
+
+    # 표에서 새어 나온 짧은 조각이 앞쪽에 잔뜩 붙어 문단 수가 부풀려진 상태.
+    # 병합하면 이 조각들은 clean 문단에 흡수되고 dirty 문단은 그대로 남는다.
+    unmerged = ["성명", "성별", "직위", "(주)"] * 5 + [clean, dirty]
+    merged = merge_short_paragraphs(unmerged, min_chars=10)
+
+    c_un = contamination(unmerged, ["기대신용손실"])
+    c_me = contamination(merged, ["기대신용손실"])
+
+    # 오염된 텍스트 자체는 한 글자도 달라지지 않았다
+    assert c_un["dirty_chars"] == c_me["dirty_chars"] == len(dirty)
+
+    # 문단 수 기준은 분모가 22 -> 2 로 줄어 10배 넘게 뛴다 (착시)
+    assert c_me["contamination_share_paras"] / c_un["contamination_share_paras"] > 10
+
+    # 문자 수 기준은 병합 시 삽입된 공백만큼만 움직인다 (상대변화 20% 미만)
+    rel = abs(c_me["contamination_share"] - c_un["contamination_share"]) \
+        / c_un["contamination_share"]
+    assert rel < 0.2, (c_un["contamination_share"], c_me["contamination_share"])
+
+
+def test_contamination_share_uses_characters_not_paragraph_count():
+    from src.pilot.p0c_boundary_audit import contamination
+
+    short_dirty = "기대신용손실"          # 6자
+    long_clean = "가" * 594               # 594자
+    c = contamination([short_dirty, long_clean], ["기대신용손실"])
+    assert c["contamination_share_paras"] == 0.5      # 2문단 중 1문단
+    assert c["contamination_share"] == 0.01           # 600자 중 6자
+    assert c["total_chars"] == 600 and c["dirty_chars"] == 6
+
+
+def test_markers_for_section_specific_sets():
+    from src.pilot.p0c_boundary_audit import markers_for
+
+    cfg = {"default": ["기대신용손실", "리스부채"], "S2": ["기대신용손실"]}
+    assert markers_for(cfg, "S1") == ["기대신용손실", "리스부채"]
+    assert markers_for(cfg, "S2") == ["기대신용손실"]
+    # 구버전 평면 리스트도 그대로 받는다
+    assert markers_for(["가", "나"], "S1") == ["가", "나"]

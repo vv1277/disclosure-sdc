@@ -15,6 +15,21 @@ _MULTI_NEWLINE = re.compile(r"\n{3,}")
 # 각주 마커: 주1), 주1, *1, ※, (주1) 등
 _FOOTNOTE = re.compile(r"(?:\(\s*주\s*\d*\s*\)|주\s*\d+\s*\)|※|\*\s*\d+\s*\))")
 
+# DART 편집기 플레이스홀더. 공시 내용이 아니라 작성 도구의 위젯 라벨이 본문에
+# 그대로 실려 나온 것이다. 예: "◆click◆『수주상황』 삽입"
+# 2016/2020 서식의 전 기업 문서 절반에 들어 있어, 제거하지 않으면 '기업 간 공통
+# 변경 문단' 신호를 통째로 오염시킨다. (P0-d 에서 발견)
+_EDITOR_PLACEHOLDER = re.compile(
+    r"◆\s*click\s*◆\s*(?:『[^』]{0,60}』)?\s*(?:삽입|추가)?",
+    re.IGNORECASE,
+)
+
+# 같은 계열의 DART 편집기 잔재.
+#   &cr  : 줄바꿈 엔티티가 이스케이프되지 않고 본문에 그대로 남은 것 (356건 중 236건)
+#   11011#*_수주상황.dsl : 서식 템플릿 파일명이 본문에 실려 나온 것 (59건)
+_DART_ENTITY = re.compile(r"&cr(?![A-Za-z0-9]);?", re.IGNORECASE)
+_DSL_REF = re.compile(r"\d{4,6}\s*#\s*\*?\s*_\S+?\.dsl", re.IGNORECASE)
+
 # 섹션명 매칭 시 무시할 문자: 공백, 중점류, 괄호, 구두점
 _NAME_STRIP = re.compile(r"[\s·ㆍ・･\.\,\:\;\-\—\–\_\(\)\[\]\{\}<>「」『』\"'’‘“”/\|]+")
 
@@ -33,6 +48,9 @@ def clean_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_INVISIBLE)
     s = _SPACE_LIKE.sub(" ", s)
+    s = _EDITOR_PLACEHOLDER.sub(" ", s)
+    s = _DSL_REF.sub(" ", s)
+    s = _DART_ENTITY.sub(" ", s)
     s = _FOOTNOTE.sub(" ", s)
     s = "\n".join(line.strip() for line in s.split("\n"))
     s = _MULTI_SPACE.sub(" ", s)

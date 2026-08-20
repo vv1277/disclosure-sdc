@@ -105,33 +105,56 @@ def audit_document(
 # Part 1-2 — 오염 탐지
 # ===========================================================================
 
+def markers_for(cfg_markers: Any, section: str) -> list[str]:
+    """섹션별 오염 마커 세트 (P0-d Part A-2). 구버전(평면 리스트)도 받아준다."""
+    if isinstance(cfg_markers, dict):
+        return list(cfg_markers.get(section, cfg_markers.get("default", [])))
+    return list(cfg_markers)
+
+
 def contamination(paragraphs: list[str], markers: list[str]) -> dict[str, Any]:
-    """오염 마커 개수와 오염 문단 비중."""
+    """오염 마커 개수와 오염 비중.
+
+    비중은 **문자 수 기준**을 기본으로 쓴다 (P0-d Part A-1).
+    문단 수 기준은 문단 병합과 표 제거로 분모가 통째로 바뀌기 때문에,
+    오염량이 그대로여도 legacy/fixed 값이 달라져 비교가 왜곡된다.
+    문자 수 기준은 분모가 실제 본문 분량이라 그 왜곡이 없다.
+    """
     n_hits = 0
     hit_markers: set[str] = set()
     n_dirty = 0
+    dirty_chars = 0
+    total_chars = 0
     for p in paragraphs:
+        total_chars += len(p)
         found = [m for m in markers if m in p]
         if found:
             n_dirty += 1
+            dirty_chars += len(p)
             n_hits += len(found)
             hit_markers.update(found)
     n = len(paragraphs)
     return {
+        "n_markers_used": len(markers),
         "n_marker_hits": n_hits,
         "n_distinct_markers": len(hit_markers),
         "markers_found": ", ".join(sorted(hit_markers)),
         "n_dirty_paragraphs": n_dirty,
-        "contamination_share": round(n_dirty / n, 4) if n else 0.0,
+        "dirty_chars": dirty_chars,
+        "total_chars": total_chars,
+        # 기본 지표: 문자 수 기준
+        "contamination_share": round(dirty_chars / total_chars, 4) if total_chars else 0.0,
+        # 참고용: 기존 문단 수 기준 (분모 효과로 비교 왜곡 있음)
+        "contamination_share_paras": round(n_dirty / n, 4) if n else 0.0,
     }
 
 
-def contamination_frame(records: list[dict], markers: list[str]) -> pd.DataFrame:
+def contamination_frame(records: list[dict], markers: Any) -> pd.DataFrame:
     rows = []
     for rec in records:
         for variant in ("legacy", "fixed"):
             for sid, sc in rec[variant].items():
-                c = contamination(sc.paragraphs, markers)
+                c = contamination(sc.paragraphs, markers_for(markers, sid))
                 rows.append({
                     "corp_code": rec["meta"]["corp_code"],
                     "corp_name": rec["meta"]["corp_name"],
@@ -367,6 +390,7 @@ def write_contamination_report(cfg: Config, cont: pd.DataFrame, audit: pd.DataFr
                                out_dir: Path) -> Path:
     a = cfg["audit"]
     markers = a["contamination_markers"]
+    marker_sets = markers if isinstance(markers, dict) else {"default": markers}
     thr = float(a["contamination_share_max"])
     lines: list[str] = []
     add = lines.append
@@ -374,7 +398,12 @@ def write_contamination_report(cfg: Config, cont: pd.DataFrame, audit: pd.DataFr
     add("# P0-c 오염 진단 리포트\n")
     add("S1(사업의 내용)으로 추출된 텍스트에 K-IFRS 재무제표 주석이 섞여 들어갔는지 "
         "마커 기반으로 검사한다.\n")
-    add("검사 마커: " + ", ".join(f"`{m}`" for m in markers) + "\n")
+    for key, ms in marker_sets.items():
+        label = "기본(S1/S3/S4)" if key == "default" else key
+        add(f"- 검사 마커 [{label}]: " + ", ".join(f"`{m}`" for m in ms))
+    add("")
+    add("오염 비중은 **문자 수 기준**이다: "
+        "(오염 문단의 문자 수 합) / (섹션 전체 문자 수).\n")
 
     add("## 1. 섹션별 오염 지표 (legacy vs fixed)\n")
     agg = (

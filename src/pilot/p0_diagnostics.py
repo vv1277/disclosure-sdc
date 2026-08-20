@@ -211,6 +211,25 @@ def _md_table(df: pd.DataFrame) -> str:
     return df.to_markdown(index=False) + "\n"
 
 
+def _common_paragraph_check(out_dir: Path) -> tuple[str, bool | None, str]:
+    """Gate 0 의 '기업 간 공통 변경 문단' 칸을 실제 값으로 채운다 (P0-d Part D-11).
+
+    P0-d 의 clean 기준(문단 중복 제거 + 회계기준 주석 문단 제외)을 1순위로 쓰고,
+    없으면 P0-b 값으로 물러난다. 둘 다 없으면 '미측정'을 명시한다.
+    """
+    p0d = out_dir / "pairs_recount_p0d.csv"
+    if p0d.exists():
+        n = int(pd.read_csv(p0d)["n_common_pairs_clean"].sum())
+        return ("기업 간 공통 변경 문단 관측", n > 0,
+                f"{n:,}쌍 (중복·회계주석 문단 제외 후)")
+    p0b = out_dir / "common_paragraph_counts.csv"
+    if p0b.exists():
+        n = int(pd.read_csv(p0b)["n_common_pairs"].sum())
+        return ("기업 간 공통 변경 문단 관측", n > 0, f"{n:,}쌍 (P0-b, 중복 제거 전)")
+    return ("기업 간 공통 변경 문단 관측", None,
+            "미측정 — `python -m src.pilot.p0d_report` 를 먼저 실행하세요")
+
+
 def write_report(cfg: Config, diag: pd.DataFrame, reports: pd.DataFrame,
                  fails: FailureLog, out_dir: Path, *, mock: bool) -> Path:
     """작업 7) data/pilot/report.md"""
@@ -245,11 +264,15 @@ def write_report(cfg: Config, diag: pd.DataFrame, reports: pd.DataFrame,
     add(_md_table(pivot))
 
     add("### 섹션 전체 요약\n")
+    add("`found_rate` 는 **시작 헤더와 종료 헤더를 모두 찾은** 경우만 성공으로 센다. "
+        "종료 헤더를 못 찾으면(EOF) 섹션이 문서 끝까지 흘렀을 수 있으므로 실패로 "
+        "강등한다 (`config.yaml` 의 `parse.require_terminator`).\n")
     summary = (
         diag.groupby(["section", "section_name"])
         .agg(
             n_docs=("char_len_text", "size"),
             found_rate=("found", "mean"),
+            n_eof=("end_reason", lambda x: int((x == "EOF").sum())),
             mean_chars=("char_len_text", "mean"),
             median_chars=("char_len_text", "median"),
             mean_table_chars=("char_len_table", "mean"),
@@ -303,7 +326,7 @@ def write_report(cfg: Config, diag: pd.DataFrame, reports: pd.DataFrame,
          s1_mean >= g["s1_mean_chars_min"], f"{s1_mean:,.0f}자"),
         (f"S2(경영진단) {g['s2_drop_threshold_chars']:,}자 이상 (미만이면 MVP 제외)",
          s2_mean >= g["s2_drop_threshold_chars"], f"{s2_mean:,.0f}자"),
-        ("기업 간 공통 변경 문단 관측", None, "P0-b 에서 판정 (change_diagnostics.md)"),
+        _common_paragraph_check(out_dir),
     ]
     add(_md_table(pd.DataFrame(
         [{"항목": c[0],

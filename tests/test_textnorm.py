@@ -54,3 +54,45 @@ def test_split_paragraphs_min_chars():
 def test_tokenize_and_ngrams():
     assert tokenize_eojeol(" 가나 다라  마 ") == ["가나", "다라", "마"]
     assert char_ngrams("가나 다라", 3) == {"가나다", "나다라"}
+
+
+# ---------------------------------------------------------------------------
+# DART 편집기 플레이스홀더 제거 (P0-d 에서 발견)
+# ---------------------------------------------------------------------------
+
+def test_editor_placeholder_removed():
+    """'◆click◆『수주상황』 삽입' 은 공시 내용이 아니라 작성 도구의 위젯 라벨이다.
+
+    2016/2020 서식 문서의 절반에 전 기업 공통으로 들어 있어, 남겨두면
+    '기업 간 공통 변경 문단' 신호를 통째로 오염시킨다.
+    """
+    assert clean_text("◆click◆『수주상황』 삽입") == ""
+    assert clean_text("◆click◆『신용보강 제공 현황』 삽입") == ""
+    assert clean_text("◆ click ◆ 『공모자금의 사용내역』 삽입") == ""
+
+
+def test_editor_placeholder_removed_inline_keeping_real_text():
+    got = clean_text("당사의 수주 현황은 다음과 같습니다. ◆click◆『수주상황』 삽입")
+    assert "click" not in got and "◆" not in got
+    assert got == "당사의 수주 현황은 다음과 같습니다."
+
+
+def test_normal_text_with_brackets_is_untouched():
+    """『』 자체는 정상 텍스트에도 쓰인다. 플레이스홀더 패턴일 때만 지운다."""
+    src = "당사는 『회사법』 에 따라 이사회를 운영합니다."
+    assert clean_text(src) == src
+
+
+def test_dart_entity_and_template_filename_removed():
+    """`&cr` 엔티티(356건 중 236건)와 서식 파일명(59건)도 편집기 잔재다."""
+    assert clean_text("가. 생산능력 및 산출근거&cr (1) 생산능력") == \
+        "가. 생산능력 및 산출근거 (1) 생산능력"
+    assert clean_text("3. 재무상태 &cr &cr 가. 재무상태") == "3. 재무상태 가. 재무상태"
+    assert clean_text("11011#*_수주상황.dsl 1. 사업의 개요") == "1. 사업의 개요"
+    assert clean_text("11011#*_수주상황.dsl &cr") == ""
+
+
+def test_ampersand_words_that_are_not_entities_survive():
+    """'&cr' 만 지운다. 정상 텍스트의 & 는 건드리지 않는다."""
+    src = "당사는 R&D 및 M&A 를 통해 성장하였습니다."
+    assert clean_text(src) == src
