@@ -49,6 +49,13 @@ sections:
     name: "임원 및 직원 등에 관한 사항"
     aliases: ["임원 및 직원 등에 관한 사항", "임원 및 직원에 관한 사항"]
 
+# P0-e — Gate 0 종료
+gate0_close:
+  # 잔재 제거 전/후 비교용 코퍼스. 제거 전은 P0-c 가 남긴 sections_fixed/ 다.
+  corpus_before: sections_fixed
+  corpus_after: sections
+  taxonomy_sample: 20             # '기타' 로 분류된 것 중 사람이 볼 샘플 수
+
 # ---------------------------------------------------------------------
 # 파싱 옵션 (P0-c Part 2~3)
 # ---------------------------------------------------------------------
@@ -91,6 +98,14 @@ audit:
 manual_review:
   n_docs: 20                      # 수동 검수 표본 문서 수
   snippet_chars: 300
+  # 브라우저에서 내려받은 검수 결과 JSON. 있으면 이것을 1순위로 읽는다.
+  result_json: data/pilot/manual_review_result.json
+  # JSON 이 없을 때 쓰는 기록. 출처를 반드시 남긴다 (재현 불가 데이터이므로).
+  reported:
+    source: "연구자 구두 보고 (2026-08-21). 브라우저 JSON 은 export 되지 않음."
+    n_items: 80                   # 20개 문서 x 4개 섹션
+    n_ok: 80
+    n_ng: 0
 
 # Gate 0 통과 조건 (문서 'Gate 0 — 통과 조건')
 gate0:
@@ -148,3 +163,52 @@ universe:
   - {stock_code: "034230", name: "파라다이스",           market: KOSDAQ, size_tier: small}
   - {stock_code: "122870", name: "와이지엔터테인먼트",    market: KOSDAQ, size_tier: small}
   - {stock_code: "041510", name: "에스엠",              market: KOSDAQ, size_tier: small}
+
+# =====================================================================
+# Phase 1 — 데이터 인프라
+# =====================================================================
+phase1:
+  fiscal_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+  top_n_by_mcap: 800            # 각 회계연도 말 기준 시총 상위 N
+  markets: [KOSPI, KOSDAQ]
+  exclude_sectors: ["금융업"]    # KRX 업종 대분류
+  exclude_name_patterns:        # 스팩/우선주/리츠 제외
+    - "스팩"
+    - "제[0-9]+호"
+    - "우$"
+    - "우[BC]$"
+    - "[0-9]우$"
+    - "리츠"
+  december_fiscal_only: true
+
+  paths:
+    filings: data/raw/filings           # {rcept_no}.zip
+    prices: data/raw/prices
+    meta: data/meta                     # universe_{year}.parquet, filings_index.parquet
+    reference: data/reference           # 공정위 기업집단 원자료 (수동 배치)
+    corpus: data/corpus                 # 파싱 결과
+
+  api_quota:
+    daily_limit: 19000                  # 20,000 중 여유 1,000 남김
+    counter_file: data/meta/dart_call_counter.json
+
+  # 사용자 요구 1) 공정위 대규모기업집단 -> 계열 관계 통제 (Phase 5 계열사 쌍 제외)
+  affiliates:
+    # 공정위 지정 자료는 연도별 스냅샷으로 관리한다.
+    # TODO(API): data.go.kr 공정거래위원회 오픈API 키가 생기면 자동 수집으로 교체.
+    #            그 전까지는 아래 경로에 연도별 파일을 수동으로 둔다.
+    #   data/reference/fair_trade_groups_{year}.csv
+    #   컬럼: group_name, corp_name  (그 외 컬럼은 무시)
+    source_glob: "fair_trade_groups_*.csv"
+    out: data/meta/affiliate_groups.parquet
+    name_match_threshold: 92            # 기업명 퍼지 매칭 임계값
+
+  # 사용자 요구 2) 편집기 잔재 제거 적용 + 제거 전 텍스트 병행 보관
+  keep_raw_text: true                   # data/corpus/raw_text/ 에 제거 전 텍스트 보관
+
+  # 사용자 요구 3) S4 는 텍스트가 아니라 표를 구조화 데이터로
+  officers:
+    section: S4
+    out: data/panel/officers.parquet
+    columns: [corp_code, fy, rcept_no, name, position, is_registered,
+              tenure_raw, tenure_months, term_end_raw, full_time, duty]

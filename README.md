@@ -293,7 +293,60 @@ disclosure-sdc/
 - 각 Phase는 재실행 가능(idempotent)하다. 이미 받은 ZIP은 다시 받지 않는다.
 - 개별 실패가 전체를 중단시키지 않고 `failures.csv` 에 쌓인다.
 
-## 12. 다음 단계
+## 12-a. Phase 0 종료 (P0-e)
+
+```bash
+python -m src.pilot.p0e_close
+```
+
+| 산출물 | 내용 |
+|---|---|
+| `results/pilot/artifact_impact.md` | **논문 Appendix 원본** — DART 편집기 잔재가 유사도 측정에 미치는 영향 (제거 전/후 cos·Jaccard·Levenshtein 비교) |
+| `results/pilot/artifact_coverage.csv` | 잔재 3종의 문서 커버리지·제거 문자 수 |
+| `results/pilot/common_pair_taxonomy.md` | 남은 공통쌍 4분류 (서식소제목/K-IFRS/법령인용/기타) |
+| `results/pilot/gate0_final.md` | Gate 0 최종 판정 · Phase 0 종료 |
+
+제거 전 텍스트는 P0-c 가 남긴 `data/pilot/sections_fixed/` 에 그대로 있고, 제거 후는
+`data/pilot/sections/` 다. 두 코퍼스를 그대로 비교하므로 파서를 다시 건드리지 않는다.
+
+**S4 는 텍스트 섹션에서 탈락**했다 (본문 평균 1,081자). 내용이 사실상 전부 표라서,
+Phase 1 에서 표를 구조화 데이터로 추출하는 소스로 재분류한다.
+
+---
+
+## 13. Phase 1 — 데이터 인프라 (진행 중)
+
+MVP 표본(각 회계연도 말 시총 상위 800개 × 2015–2024)의 공시 원문과 메타를 전량 확보한다.
+
+### Phase 0 에서 넘어온 요구사항 3가지
+
+| # | 요구 | 구현 | 상태 |
+|---|---|---|---|
+| 1 | 공정위 대규모기업집단 → `corp_code` 매핑 (연도별 스냅샷) | [src/collect/affiliates.py](src/collect/affiliates.py) | 로더·매칭 완성. **원자료 수동 배치 필요** |
+| 2 | 편집기 잔재 제거 적용 + 제거 전 텍스트 병행 보관 | `clean_text()` + `phase1.keep_raw_text` | 설정 완료 |
+| 3 | S4 표를 구조화 데이터로 추출 | [src/parse/officers.py](src/parse/officers.py) | 핵심 동작. 중첩 표 한계 있음 |
+
+**요구 1 — 공정위 자료**는 API 키가 없어 자동 수집을 붙이지 못했다.
+기업집단포털(egroup.go.kr)에서 연도별 소속회사 현황을 내려받아 아래에 두면 된다.
+
+```
+data/reference/fair_trade_groups_{year}.csv
+필수 컬럼: group_name, corp_name
+```
+
+연도별로 두는 이유는 지정이 매년 바뀌기 때문이다. SKC 가 2023년 ISC 를 인수한
+사례가 표본 안에 실제로 있어, 단일 시점 매핑을 쓰면 인수 전 연도까지 계열사로
+잘못 묶인다.
+
+### 생존편향
+
+"현재 상장된 기업 목록"으로 표본을 만들면 안 된다. 각 회계연도 말 시점의 상장종목
+스냅샷을 따로 만들고 그 기준으로 표본을 구성한다. 상장폐지된 기업도 그 시점에
+상장되어 있었다면 반드시 포함한다.
+
+---
+
+## 14. 다음 단계
 
 1. OpenDART 키 발급 → `.env` 에 기입
 2. `python -m src.pilot.p0_diagnostics --limit 3` 로 실데이터 소규모 시운전

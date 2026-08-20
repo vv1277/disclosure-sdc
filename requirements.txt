@@ -3,7 +3,10 @@
 # NOTE: kept ASCII-only on purpose -- pip decodes this file with the system
 # locale codec (cp949 on Korean Windows), so non-ASCII comments break install.
 pandas>=2.2
-pyarrow>=16.0
+# pyarrow >= 20 requires pandas 3.x (pandas.api.internals); pin below that
+# until we move to pandas 3. Symptom if unpinned:
+#   ModuleNotFoundError: No module named 'pandas.api.internals'
+pyarrow>=16,<20
 numpy>=1.26
 requests>=2.32
 beautifulsoup4>=4.12
@@ -16,4 +19,7 @@ PyYAML>=6.0
 python-dotenv>=1.0
 tqdm>=4.66
 tabulate>=0.9
+# Phase 1: KRX universe / prices
+pykrx>=1.0.45
+openpyxl>=3.1
 pytest>=8.2
