@@ -210,6 +210,22 @@ phase1:
     name_match_threshold: 92            # 기업명 퍼지 매칭 임계값
     review_bottom_n: 50                 # 퍼지 점수 하위 N건은 사람이 검수한다
 
+  # 이벤트일 규칙 (Phase 1 결정 1). 접수'시각'은 수집하지 않는다.
+  event_rule:
+    definition: "이벤트일 = 접수일 + 1 거래일"
+    entry: "이벤트일 시가"
+    collect_rcept_time: false
+
+  # Gate 1 통과 조건
+  gate1:
+    download_success_rate_min: 0.95
+    require_delisted_in_universe: true    # 연도별 상폐 예정 기업이 0이면 버그
+    # (변경) 접수'일자'가 전 건에 존재하고, 이벤트일 = 접수일 +1 거래일 규칙이
+    # 코드에 강제되어 있을 것. 접수'시각'은 요구하지 않는다.
+    require_rcept_dt: true
+    require_rcept_time: false
+    require_idempotent_rerun: true        # 재실행 시 네트워크 호출 0건
+
   # 사용자 요구 2) 편집기 잔재 제거 적용 + 제거 전 텍스트 병행 보관
   keep_raw_text: true                   # data/corpus/raw_text/ 에 제거 전 텍스트 보관
 
@@ -219,3 +235,48 @@ phase1:
     out: data/panel/officers.parquet
     columns: [corp_code, fy, rcept_no, name, position, is_registered,
               tenure_raw, tenure_months, term_end_raw, full_time, duty]
+
+# =====================================================================
+# Phase 4.4 — 소송/제재 표 구조화
+# =====================================================================
+# S3 를 표본에 넣은 이유가 소송이다. CMN(2020) 이 임원 변화와 함께 가장 강한
+# 예측력을 발견한 채널이고 논문 Table 3 의 한 행을 담당한다. 그런데 한국
+# 사업보고서의 소송은 대부분 표로 작성되므로, 표를 텍스트에서 분리한 현재
+# 상태에서는 이 채널이 통째로 소실된다. 임원과 같은 방식으로 표에서 뽑는다.
+lawsuits:
+  sections: [S3, S1]
+
+  # 표 판정 1순위 — 캡션/표 내부 문구
+  caption_keywords: [소송, 제재, 우발부채, 견질, 계류, 손해배상, 분쟁]
+  # 제재 표는 소송과 분리해서 센다
+  sanction_keywords: [제재, 과징금, 과태료, 시정명령, 경고, 검찰, 고발]
+
+  # 표 판정 2순위 — 헤더 컬럼명. 서식이 기업마다 달라 사전으로 분리한다.
+  column_aliases:
+    case_no:   [사건번호, 사건, 사건의 표시]
+    plaintiff: [원고, 소송 당사자(원고), 신청인, 청구인]
+    defendant: [피고, 소송 당사자(피고), 피신청인, 피청구인]
+    content:   [소송의 내용, 소송내용, 소송사건내역, 사건내용, 소송의 개요,
+                "소송내용(청구취지, 청구원인 등)", 구분, 소송의 명칭]
+    amount:    [소송가액, 소가, 청구금액, 소송금액, 청구액]
+    status:    [진행상황, 진행현황, 진행사항, 소송의 진행상황, 계류법원, 현황]
+    filed_on:  [소제기일, 소 제기일, 제기일, 소송제기일, 접수일]
+
+  # 헤더에 단위가 박혀 있는 경우가 많다: 소송가액(억원), 소송가액(원화단위: 천원)
+  amount_units:
+    조: 1000000000000
+    억: 100000000
+    백만: 1000000
+    천: 1000
+    원: 1
+
+  # 소송 0건으로 볼 표기 (결측이 아니다)
+  none_tokens: ["해당사항 없음", "해당사항없음", "해당없음", "없음", "-", "N/A", "없습니다"]
+
+  min_rows: 1                 # 헤더 아래 데이터가 최소 이만큼
+  review_sample: 30           # 판정 결과 검수용 표본 수
+  new_case_sample: 20         # 신규 제기 검증 표본 수
+  # 연도별 소송 보유 기업 비율이 이 범위를 벗어나면 표 식별 버그로 본다
+  sanity_holder_rate: [0.30, 0.60]
+
+  out_features: data/panel/lawsuit_features.parquet
