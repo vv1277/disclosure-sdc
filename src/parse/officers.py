@@ -247,12 +247,38 @@ def extract_officers(tables_html: list[str]) -> pd.DataFrame:
     return df.drop_duplicates(subset=["name", "position", "duty"]).reset_index(drop=True)
 
 
+def has_nested_table(tables_html: list[str]) -> bool:
+    """표 안에 표가 또 있는가. 중첩이면 격자 생성이 어긋난다 (알려진 한계)."""
+    for t in tables_html:
+        soup = BeautifulSoup(t, "html.parser")
+        outer = soup.find("table")
+        if outer is not None and outer.find("table") is not None:
+            return True
+    return False
+
+
 def extract_for_document(tables_html: list[str], *, corp_code: str, fy: int,
-                         rcept_no: str) -> pd.DataFrame:
+                         rcept_no: str) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """(임원 표, 진단 지표).
+
+    파서를 지금 고치지 않는 대신, 나중에 규모를 보고 판단할 수 있도록
+    문서마다 진단 지표를 남긴다 (Phase 1 요구 C).
+    """
     df = extract_officers(tables_html)
-    if df.empty:
-        return df
-    df.insert(0, "rcept_no", rcept_no)
-    df.insert(0, "fy", fy)
-    df.insert(0, "corp_code", corp_code)
-    return df
+    n = len(df)
+    null_rate = (float(df["is_registered"].isna().mean())
+                 if n else None)
+    diag: dict[str, Any] = {
+        "corp_code": corp_code, "fy": fy, "rcept_no": rcept_no,
+        "n_tables": len(tables_html),
+        "n_officers_extracted": n,
+        "has_nested_table": has_nested_table(tables_html),
+        "is_registered_null_rate": round(null_rate, 4) if null_rate is not None else None,
+        "extraction_method": "grid_colspan_v1",
+    }
+    if n:
+        df = df.copy()
+        df.insert(0, "rcept_no", rcept_no)
+        df.insert(0, "fy", fy)
+        df.insert(0, "corp_code", corp_code)
+    return df, diag

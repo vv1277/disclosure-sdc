@@ -22,6 +22,7 @@ from typing import Any, Iterable
 
 import requests
 
+from src.collect.quota import DailyQuota, QuotaExceeded
 from src.utils.config import PROJECT_ROOT, Config
 
 log = logging.getLogger(__name__)
@@ -94,6 +95,14 @@ class DartClient:
         self.raw_dir = cfg.dir("raw")
         self.session = requests.Session()
         self.n_calls = 0
+        self.n_cache_hits = 0
+
+        # 일일 한도. Phase 1 은 7,000건 이상을 받으므로 반드시 세야 한다.
+        q = (cfg.get("phase1") or {}).get("api_quota") or {}
+        self.quota = DailyQuota(
+            PROJECT_ROOT / q.get("counter_file", "data/meta/dart_call_counter.json"),
+            limit=int(q.get("daily_limit", api_cfg.get("daily_limit", 15_000))),
+        )
 
     # ---------------- 저수준 ----------------
 
@@ -107,9 +116,11 @@ class DartClient:
                 wait = self.backoff_base * (2 ** (attempt - 1))
                 log.info("retry %d/%d in %.1fs (%s)", attempt, self.max_retries - 1, wait, endpoint)
                 time.sleep(wait)
+            self.quota.check()
             try:
                 resp = self.session.get(url, params=p, timeout=self.timeout)
                 self.n_calls += 1
+                self.quota.consume()
                 time.sleep(self.sleep_sec)
                 if resp.status_code >= 500:
                     last_exc = DartApiError(str(resp.status_code), "server error")
@@ -180,11 +191,14 @@ class DartClient:
             page_no += 1
         return out
 
-    def download_document(self, rcept_no: str) -> Path:
-        """공시서류원본파일 API. data/raw/{rcept_no}.zip 으로 캐시한다."""
-        dest = self.raw_dir / f"{rcept_no}.zip"
+    def download_document(self, rcept_no: str, dest_dir: Path | None = None) -> Path:
+        """공시서류원본파일 API. {dest_dir}/{rcept_no}.zip 으로 캐시한다."""
+        base = Path(dest_dir) if dest_dir is not None else self.raw_dir
+        base.mkdir(parents=True, exist_ok=True)
+        dest = base / f"{rcept_no}.zip"
         if dest.exists() and dest.stat().st_size > 0:
             log.debug("원본 ZIP 캐시 사용: %s", dest)
+            self.n_cache_hits += 1
             return dest
         resp = self._request("document.xml", {"rcept_no": rcept_no})
         body = resp.content

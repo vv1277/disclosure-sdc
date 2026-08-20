@@ -52,20 +52,34 @@ def normalize_corp_name(name: str) -> str:
     return s.upper()
 
 
-def load_snapshots(cfg: Config) -> pd.DataFrame:
-    """data/reference/fair_trade_groups_{year}.csv 들을 하나로 모은다."""
+class MissingAffiliateData(RuntimeError):
+    """공정위 기업집단 자료가 없을 때. 조용히 넘어가면 안 되는 상황이다."""
+
+
+def load_snapshots(cfg: Config, *, require: bool = True) -> pd.DataFrame:
+    """data/reference/fair_trade_groups_{year}.csv 들을 하나로 모은다.
+
+    require=True 면 자료가 없을 때 MissingAffiliateData 를 던진다.
+    Phase 5 는 반드시 require=True 로 부른다.
+    """
     p1 = cfg["phase1"]
     ref_dir = PROJECT_ROOT / p1["paths"]["reference"]
     pattern = p1["affiliates"]["source_glob"]
     files = sorted(ref_dir.glob(pattern))
     if not files:
-        log.warning(
-            "공정위 기업집단 자료가 없습니다: %s/%s\n"
-            "  TODO(API): 키 발급 전까지는 기업집단포털에서 연도별 소속회사 현황을\n"
-            "  내려받아 group_name, corp_name 두 컬럼으로 저장하세요.\n"
-            "  이 매핑이 없으면 Phase 5 의 계열사 쌍 제외를 할 수 없습니다.",
-            ref_dir, pattern)
-        return pd.DataFrame(columns=["year", "group_name", "corp_name"])
+        if not require:
+            log.warning("공정위 기업집단 자료 없음 (require=False 이므로 계속): %s/%s",
+                        ref_dir, pattern)
+            return pd.DataFrame(columns=["year", "group_name", "corp_name"])
+        raise MissingAffiliateData(
+            f"공정위 기업집단 자료가 없습니다: {ref_dir}/{pattern}\n"
+            f"  기업집단포털(https://www.egroup.go.kr)에서 연도별 소속회사 현황을\n"
+            f"  내려받아 group_name, corp_name 두 컬럼으로 저장하세요.\n"
+            f"    {ref_dir}/fair_trade_groups_2016.csv ... _2024.csv\n"
+            f"  이 매핑 없이 Phase 5 를 돌리면 계열사 쌍이 통제되지 않은 채로\n"
+            f"  '기업 간 공통 변경 문단'이 집계됩니다. 그것이 최악의 결과이므로\n"
+            f"  조용히 빈 매핑을 반환하지 않고 여기서 중단합니다.\n"
+            f"  Phase 5 이전 단계만 돌릴 것이라면 require=False 로 호출하세요.")
 
     frames = []
     for f in files:
@@ -85,6 +99,10 @@ def load_snapshots(cfg: Config) -> pd.DataFrame:
                  m.group(1), df["group_name"].nunique(), len(df))
 
     if not frames:
+        if require:
+            raise MissingAffiliateData(
+                f"{ref_dir}/{pattern} 파일은 있으나 읽을 수 있는 것이 없습니다. "
+                f"group_name, corp_name 컬럼과 파일명의 연도를 확인하세요.")
         return pd.DataFrame(columns=["year", "group_name", "corp_name"])
     out = pd.concat(frames, ignore_index=True)
     out["corp_name_norm"] = out["corp_name"].map(normalize_corp_name)
@@ -154,9 +172,10 @@ def same_group_pairs(mapping: pd.DataFrame, year: int) -> set[frozenset[str]]:
     return pairs
 
 
-def build(cfg: Config, universe: pd.DataFrame) -> pd.DataFrame:
+def build(cfg: Config, universe: pd.DataFrame, *, require: bool = True
+          ) -> pd.DataFrame:
     p1 = cfg["phase1"]
-    snaps = load_snapshots(cfg)
+    snaps = load_snapshots(cfg, require=require)
     mapping = map_to_corp_code(
         snaps, universe,
         threshold=int(p1["affiliates"].get("name_match_threshold", 92)))
@@ -164,4 +183,14 @@ def build(cfg: Config, universe: pd.DataFrame) -> pd.DataFrame:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     mapping.to_parquet(out_path, index=False)
     log.info("기업집단 매핑 저장 -> %s (%d행)", out_path, len(mapping))
+
+    # 기업집단명·기업명은 표기 변형이 많다. 퍼지 매칭 하위 N건은 사람이 봐야 한다.
+    n_review = int(p1["affiliates"].get("review_bottom_n", 50))
+    fuzzy = mapping[mapping["match_type"] == "fuzzy"] if not mapping.empty else mapping
+    if not fuzzy.empty:
+        review = fuzzy.nsmallest(n_review, "match_score")
+        review_path = out_path.with_name("affiliate_match_review.csv")
+        review.to_csv(review_path, index=False, encoding="utf-8-sig")
+        log.warning("퍼지 매칭 하위 %d건 검수 필요 -> %s (최저 점수 %d)",
+                    len(review), review_path, int(review["match_score"].min()))
     return mapping

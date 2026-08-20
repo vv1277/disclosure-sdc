@@ -104,9 +104,25 @@ def test_parse_bool_negation_wins():
     assert parse_bool("") is None
 
 
-def test_extract_for_document_adds_keys():
+def test_extract_for_document_adds_keys_and_diagnostics():
     from src.parse.officers import extract_for_document
-    df = extract_for_document([OFFICER_TABLE], corp_code="00126380", fy=2024,
-                              rcept_no="20250311001085")
+    df, diag = extract_for_document([OFFICER_TABLE], corp_code="00126380", fy=2024,
+                                    rcept_no="20250311001085")
     assert list(df.columns[:3]) == ["corp_code", "fy", "rcept_no"]
     assert (df["fy"] == 2024).all()
+    # Phase 1 요구 C: 파서를 고치는 대신 규모를 잴 수 있게 지표를 남긴다
+    assert diag["n_officers_extracted"] == 2
+    assert diag["has_nested_table"] is False
+    assert diag["is_registered_null_rate"] == 0.0
+    assert diag["extraction_method"] == "grid_colspan_v1"
+
+
+def test_nested_table_is_flagged():
+    from src.parse.officers import extract_for_document, has_nested_table
+    nested = "<table><tr><td><table><tr><td>안쪽</td></tr></table></td></tr></table>"
+    assert has_nested_table([nested]) is True
+    _, diag = extract_for_document([nested], corp_code="X", fy=2024, rcept_no="R")
+    assert diag["has_nested_table"] is True
+    assert diag["n_officers_extracted"] == 0
+    # 0행이어도 결측률은 None 으로 남긴다 (0.0 과 구분해야 한다)
+    assert diag["is_registered_null_rate"] is None

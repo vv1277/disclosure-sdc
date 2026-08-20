@@ -20,6 +20,10 @@ python-dotenv>=1.0
 tqdm>=4.66
 tabulate>=0.9
 # Phase 1: KRX universe / prices
+# pykrx 1.2.8 does not work against the current KRX site (empty ticker list,
+# KeyError on market cap, OHLCV needs KRX_ID/KRX_PW). Kept only for the
+# krx_login mcap path. Universe listing/delisting comes from FinanceDataReader.
 pykrx>=1.0.45
+finance-datareader>=0.9.90
 openpyxl>=3.1
 pytest>=8.2
