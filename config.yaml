@@ -174,7 +174,7 @@ phase1:
   #   unset                          -> snapshot() 이 명시적으로 실패한다 (기본)
   #   yearend_close_x_current_shares -> 연도말 종가 x 현재 주식수 (근사)
   #   krx_login                      -> KRX_ID/KRX_PW 로 pykrx 시총 API 사용
-  mcap_method: unset
+  mcap_method: krx_login
   markets: [KOSPI, KOSDAQ]
   exclude_sectors: ["금융업"]    # KRX 업종 대분류
   exclude_name_patterns:        # 스팩/우선주/리츠 제외

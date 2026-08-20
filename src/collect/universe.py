@@ -19,24 +19,21 @@
   상장폐지 목록에 상장일·폐지일이 있으므로 '연도 말 시점에 상장되어 있었는가' 를
   정확히 판정할 수 있다. 2016~2024 사이 폐지가 1,136건이다.
 
-시가총액 산정 — 미결 (config 의 phase1.mcap_method)
-  '연도 말 시가총액 상위 800' 을 뽑으려면 과거 시점의 시가총액이 필요한데,
-  FDR 은 **현재** 시가총액만 준다. 두 가지 방법이 있고 표본이 달라진다.
+시가총액 산정 — krx_login (연구자 결정)
+  '연도 말 시가총액 상위 800' 에는 과거 시점 시가총액이 필요한데 FDR 은 현재
+  시총만 준다. 근사(연도말 종가 x 현재 주식수)는 유상증자·액면분할 기업에서
+  과거 시총을 왜곡하므로, 정확한 KRX 시총 API 를 쓰기로 했다.
 
-    yearend_close_x_current_shares (기본)
-        연도 말 종가 x 현재 상장주식수. 종목당 가격 이력 1회 요청이 필요하고
-        (약 4,000종목), 유상증자·액면분할이 있었던 기업은 과거 시총이 왜곡된다.
+  .env 의 KRX_ID / KRX_PW 를 환경변수로 올리면 pykrx 가 로그인해 시총을 준다.
+  자격증명은 .env 에만 둔다 (.env 는 gitignore 대상).
 
-    krx_login
-        KRX_ID/KRX_PW 를 넣고 pykrx 의 시가총액 API 를 그대로 쓴다.
-        정확하지만 KRX 계정이 필요하다.
-
-  **어느 쪽을 쓸지 정하기 전에는 유니버스를 확정하지 않는다.** 유니버스가 틀리면
-  원문 7,200건을 다시 받아야 하기 때문이다.
+  유니버스를 다 만든 뒤 로그인 실패를 발견하면 시간이 크게 낭비되므로,
+  `check_krx_login()` 으로 먼저 확인한 뒤 진행한다.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -95,6 +92,53 @@ def listed_at(cur: pd.DataFrame, dead: pd.DataFrame, date: str) -> pd.DataFrame:
     log.info("[%s] 상장 %d종목 (이후 폐지 예정 %d)", date, len(out),
              int(out["is_delisted_later"].sum()))
     return out
+
+
+class KrxLoginMissing(RuntimeError):
+    """KRX 계정이 없다. 시가총액 조회를 할 수 없다."""
+
+
+def load_krx_credentials() -> tuple[str, str]:
+    """.env 의 KRX_ID / KRX_PW 를 환경변수로 올린다.
+
+    pykrx 는 os.environ 에서 이 값을 읽는다. 코드나 config 에 두지 않는다.
+    """
+    for name in ("KRX_ID", "KRX_PW"):
+        if os.environ.get(name):
+            continue
+        dotenv = PROJECT_ROOT / ".env"
+        if dotenv.exists():
+            for line in dotenv.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    os.environ[name] = v.strip().strip('"').strip("'")
+                    break
+    kid, kpw = os.environ.get("KRX_ID", ""), os.environ.get("KRX_PW", "")
+    if not kid or not kpw:
+        raise KrxLoginMissing(
+            "KRX 계정이 설정되지 않았습니다.\n"
+            "  .env 에 KRX_ID / KRX_PW 두 줄을 채우세요 (data.krx.co.kr 계정).\n"
+            "  값은 .env 에만 둡니다 — .env 는 gitignore 대상입니다."
+        )
+    return kid, kpw
+
+
+def check_krx_login() -> str:
+    """로그인이 실제로 되는지 가벼운 호출로 확인한다.
+
+    유니버스를 다 만든 뒤에 실패하면 시간이 크게 낭비되므로 먼저 본다.
+    """
+    load_krx_credentials()
+    stock = _pykrx()
+    tickers = stock.get_market_ticker_list("20241230", market="KOSPI")
+    if not tickers:
+        raise KrxLoginMissing(
+            "KRX 로그인은 됐으나 종목 목록이 비어 있습니다. "
+            "계정 상태와 pykrx 버전을 확인하세요.")
+    return f"KRX 로그인 확인 — KOSPI {len(tickers)}종목"
 
 
 def _pykrx():
@@ -169,6 +213,9 @@ def snapshot(year: int, cfg: Config) -> pd.DataFrame:
         정확하지만 KRX 계정이 필요합니다.
 
   유니버스가 틀리면 원문 7,200건을 다시 받아야 하므로 여기서 멈춥니다.""")
+
+    if method == "krx_login":
+        load_krx_credentials()
 
     stock = _pykrx()
     date = year_end_trading_day(year)
