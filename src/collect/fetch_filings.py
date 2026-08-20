@@ -43,6 +43,8 @@ log = logging.getLogger("filings")
 
 _PERIOD = re.compile(r"\((\d{4})\.(\d{1,2})\)")
 _TIME = re.compile(r"^\d{2}:?\d{2}$")
+# 사업보고서만. 제출기한연장신고서 등 유사 이름을 배제한다.
+_REPORT_NAME = re.compile(r"^사업보고서\s*\(")
 
 INDEX_COLUMNS = [
     "corp_code", "stock_code", "corp_name", "market", "fy", "rcept_no",
@@ -61,9 +63,13 @@ def _annual_rows(rows: list[dict[str, Any]], years: set[int],
     out = []
     for r in rows:
         nm = r.get("report_nm", "") or ""
-        if "사업보고서" not in nm:
+        # 부분문자열로 보면 '사업보고서제출기한연장신고서' 가 걸린다.
+        # 실제로 30건이 이렇게 잘못 잡혔고, 그 문서는 2KB 짜리 신고서라
+        # 파싱하면 섹션이 하나도 안 나온다. 이름이 '사업보고서 (' 로
+        # 시작해야만 사업보고서로 인정한다.
+        stripped = re.sub(r"^\[[^\]]*\]\s*", "", nm).strip()
+        if not _REPORT_NAME.match(stripped):
             continue
-        stripped = re.sub(r"\[[^\]]*\]", "", nm)
         if any(tok in stripped for tok in ("분기", "반기")):
             continue
         m = _PERIOD.search(nm)

@@ -1,0 +1,43 @@
+"""filings_index 필터 (Phase 1)."""
+from src.collect.fetch_filings import _annual_rows, _pick_original
+
+YEARS = {2019}
+
+
+def _r(nm, dt, no):
+    return {"report_nm": nm, "rcept_dt": dt, "rcept_no": no}
+
+
+def test_extension_notice_is_not_an_annual_report():
+    """'사업보고서제출기한연장신고서' 는 사업보고서가 아니다.
+
+    부분문자열로 보면 걸린다. 실제로 30건이 이렇게 잘못 잡혔고,
+    그 문서는 2KB 짜리 신고서라 파싱하면 섹션이 하나도 안 나온다.
+    """
+    rows = [_r("사업보고서제출기한연장신고서 (2019.12)", "20200320", "B")]
+    assert _annual_rows(rows, YEARS, True) == []
+
+
+def test_real_report_and_correction_are_kept():
+    rows = [_r("사업보고서 (2019.12)", "20200407", "A"),
+            _r("사업보고서제출기한연장신고서 (2019.12)", "20200320", "B"),
+            _r("[기재정정]사업보고서 (2019.12)", "20201230", "C"),
+            _r("반기보고서 (2019.06)", "20190814", "D")]
+    got = [r["rcept_no"] for r in _annual_rows(rows, YEARS, True)]
+    assert got == ["A", "C"]
+
+
+def test_non_december_fiscal_year_excluded():
+    rows = [_r("사업보고서 (2019.03)", "20190620", "E")]
+    assert _annual_rows(rows, YEARS, True) == []
+    assert len(_annual_rows(rows, YEARS, False)) == 1
+
+
+def test_original_preferred_over_correction():
+    cands = _annual_rows(
+        [_r("[기재정정]사업보고서 (2019.12)", "20201230", "C"),
+         _r("사업보고서 (2019.12)", "20200407", "A")], YEARS, True)
+    ch = _pick_original(cands)
+    assert ch["rcept_no"] == "A"
+    assert ch["is_correction"] is False
+    assert ch["is_correction_exists"] is True
