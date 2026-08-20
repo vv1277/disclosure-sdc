@@ -28,6 +28,7 @@ def _doc(numbering: list[str]) -> str:
         <tr><td>{n3} 이사의 경영진단 및 분석의견</td></tr>
         <tr><td>{n4} 임원 및 직원 등에 관한 사항</td></tr>
         <tr><td>{n5} 그 밖에 투자자 보호를 위하여 필요한 사항</td></tr>
+        <tr><td>XII. 재무제표 등</td></tr>
       </table>
       <p>{n1} 회사의 개요</p>
       <p>당사는 1980년에 설립되었습니다.</p>
@@ -43,6 +44,8 @@ def _doc(numbering: list[str]) -> str:
       <p>직원 수는 100명입니다.</p>
       <p>{n5} 그 밖에 투자자 보호를 위하여 필요한 사항</p>
       <p>계류중인 소송은 없습니다.</p>
+      <p>XII. 재무제표 등</p>
+      <p>재무제표는 별첨과 같습니다.</p>
     </body></html>
     """
 
@@ -94,7 +97,8 @@ def test_toc_entry_not_selected_as_section_body():
 
 
 def test_missing_section_reported_as_not_found():
-    html = "<html><body><p>II. 사업의 내용</p><p>내용</p></body></html>"
+    html = ("<html><body><p>II. 사업의 내용</p><p>내용</p>"
+            "<p>III. 재무에 관한 사항</p><p>재무</p></body></html>")
     secs = extract_sections(html, SPEC)
     assert secs["S1"].found
     assert not secs["S2"].found

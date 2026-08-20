@@ -17,6 +17,7 @@
   python -m src.pilot.p0_diagnostics --mock          # API 키 없이 파이프라인 점검
   python -m src.pilot.p0_diagnostics --limit 3       # 실데이터 소규모 시운전
   python -m src.pilot.p0_diagnostics                 # 전체 30개
+  python -m src.pilot.p0_diagnostics --reuse-index   # 캐시만으로 재파싱 (API 0회)
 
 TODO(API): OPENDART_KEY 가 없으면 --mock 로만 실행된다.
 """
@@ -25,6 +26,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +43,18 @@ from src.utils.config import Config, load_config, set_seed
 from src.utils.failures import FailureLog
 from src.utils.logging_utils import setup_logging
 
+from bs4 import XMLParsedAsHTMLWarning
+
+# DART 원본은 XML 이지만 커스텀 태그 보존을 위해 html.parser 로 읽는다.
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+
 log = logging.getLogger("p0")
 
 DIAG_COLUMNS = [
     "corp_code", "corp_name", "stock_code", "market", "size_tier",
     "fy", "rcept_no", "is_amendment", "section", "section_name",
-    "found", "char_len_text", "char_len_table", "n_paragraphs", "parse_ok",
+    "found", "end_header", "end_reason",
+    "char_len_text", "char_len_table", "n_paragraphs", "parse_ok",
 ]
 
 
@@ -123,6 +131,7 @@ def parse_documents(cfg: Config, client, reports: pd.DataFrame,
     sec_dir.mkdir(parents=True, exist_ok=True)
     tab_dir.mkdir(parents=True, exist_ok=True)
     spec = cfg["sections"]
+    pcfg = cfg.get("parse", {}) or {}
 
     rows: list[dict[str, Any]] = []
     for r in tqdm(list(reports.itertuples(index=False)), desc="파싱", unit="doc"):
@@ -140,7 +149,11 @@ def parse_documents(cfg: Config, client, reports: pd.DataFrame,
             rows.extend(_empty_rows(r, spec))
             continue
         try:
-            sections = extract_sections(html, spec)
+            sections = extract_sections(
+                html, spec, parser=pcfg.get("parser", "html.parser"),
+                require_terminator=bool(pcfg.get("require_terminator", True)),
+                merge_min_chars=int(pcfg.get("merge_min_chars", 10)),
+            )
         except Exception as exc:
             fails.add(stage="section", key=key, reason=type(exc).__name__, detail=str(exc))
             rows.extend(_empty_rows(r, spec))
@@ -166,6 +179,8 @@ def parse_documents(cfg: Config, client, reports: pd.DataFrame,
                 "is_amendment": r.is_amendment,
                 "section": sid, "section_name": sc.name,
                 "found": sc.found,
+                "end_header": sc.end_header or sc.end_reason,
+                "end_reason": sc.end_reason,
                 "char_len_text": sc.char_len_text,
                 "char_len_table": sc.char_len_table,
                 "n_paragraphs": sc.n_paragraphs,
@@ -180,6 +195,7 @@ def _empty_rows(r, spec: dict) -> list[dict[str, Any]]:
         "stock_code": r.stock_code, "market": r.market, "size_tier": r.size_tier,
         "fy": r.fy, "rcept_no": r.rcept_no, "is_amendment": r.is_amendment,
         "section": sid, "section_name": s["name"], "found": False,
+        "end_header": "", "end_reason": "추출 실패",
         "char_len_text": 0, "char_len_table": 0, "n_paragraphs": 0,
         "parse_ok": False,
     } for sid, s in spec.items()]
@@ -317,6 +333,20 @@ def write_report(cfg: Config, diag: pd.DataFrame, reports: pd.DataFrame,
 # main
 # ---------------------------------------------------------------------------
 
+class CachedOnlyClient:
+    """data/raw 캐시만 읽는 클라이언트. --reuse-index 전용, 네트워크를 쓰지 않는다."""
+
+    def __init__(self, cfg: Config, *, mock: bool = False):
+        self.raw_dir = cfg.dir("raw") / ("mock" if mock else "")
+        self.n_calls = 0
+
+    def download_document(self, rcept_no: str) -> Path:
+        dest = self.raw_dir / f"{rcept_no}.zip"
+        if not dest.exists():
+            raise FileNotFoundError(f"원본 ZIP 캐시 없음: {dest.name}")
+        return dest
+
+
 def build_client(cfg: Config, *, mock: bool, seed: int):
     if mock:
         log.warning("MOCK 모드: 합성 공시로 실행합니다. 결과는 Gate 0 판정에 쓸 수 없습니다.")
@@ -335,6 +365,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="표본 기업 수 제한 (소규모 시운전용)")
     ap.add_argument("--mock", action="store_true",
                     help="API 키 없이 합성 공시로 파이프라인 점검")
+    ap.add_argument("--reuse-index", action="store_true",
+                    help="기존 reports_index.csv 와 data/raw 캐시만 사용해 파싱만 다시 한다 "
+                         "(API 호출 0회. 파서를 고친 뒤 재추출할 때 쓴다)")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args(argv)
 
@@ -350,11 +383,22 @@ def main(argv: list[str] | None = None) -> int:
     log.info("표본 %d개 기업 x %s", len(universe), cfg["sample"]["fiscal_years"])
 
     fails = FailureLog(out_dir / "failures.csv")
-    client = build_client(cfg, mock=args.mock, seed=seed)
 
-    mapping = resolve_mapping(cfg, client, mock=args.mock, out_dir=out_dir)
-    reports = resolve_reports(cfg, client, mapping, universe, fails)
-    reports.to_csv(out_dir / "reports_index.csv", index=False, encoding="utf-8-sig")
+    idx_path = out_dir / "reports_index.csv"
+    if args.reuse_index:
+        if not idx_path.exists():
+            raise SystemExit(f"--reuse-index 인데 {idx_path} 가 없습니다.")
+        reports = pd.read_csv(idx_path, dtype={"stock_code": str, "rcept_no": str,
+                                               "corp_code": str})
+        keep = {u["stock_code"] for u in universe}
+        reports = reports[reports["stock_code"].isin(keep)]
+        client = CachedOnlyClient(cfg, mock=args.mock)
+        log.info("기존 인덱스 재사용: %d건 (API 호출 없음)", len(reports))
+    else:
+        client = build_client(cfg, mock=args.mock, seed=seed)
+        mapping = resolve_mapping(cfg, client, mock=args.mock, out_dir=out_dir)
+        reports = resolve_reports(cfg, client, mapping, universe, fails)
+        reports.to_csv(idx_path, index=False, encoding="utf-8-sig")
     log.info("공시 %d건 확정 (정정본 사용 %d건)",
              len(reports), int(reports["is_amendment"].sum()) if not reports.empty else 0)
 

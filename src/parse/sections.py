@@ -1,4 +1,4 @@
-"""섹션 추출 (프롬프트 P0 작업 4~5).
+"""섹션 추출 (프롬프트 P0 작업 4~5, P0-c Part 2~3 수정 반영).
 
 핵심 원칙
   - 섹션 번호(로마숫자)는 연도마다 바뀐다. 번호가 아니라 '이름'으로 매칭한다.
@@ -7,56 +7,97 @@
   - 표기 변형(공백, 중점, 괄호)에 견디도록 정규화 후 매칭한다.
   - 문서 앞머리의 목차(TOC)에도 같은 이름이 나오므로,
     같은 이름의 후보가 여러 개면 '본문 길이가 가장 긴' 후보를 택한다.
+
+P0-c 에서 고친 것
+  1) 블록 분해가 화이트리스트 방식이라 DART 커스텀 컨테이너 태그
+     (<TABLE-GROUP>, <SECTION-3>, <COVER>, <LIBRARY> ...) 안의 <table> 이
+     인라인으로 취급되어 표 전체가 본문 문단으로 새어 들어왔다.
+     -> 인라인 태그만 블랙리스트로 지정하고, 나머지는 전부 블록으로 재귀한다.
+        <table> 은 어디에 있든 표 블록으로 떼어낸다.
+  2) '1. 회사의 개요', '2. 재무 등에 관한 사항' 같은 하위 소제목이
+     최상위 헤더로 오인되어 섹션이 잘못 잘렸다.
+     -> 정규화 후 '정확 일치'를 요구하고(퍼지 92 -> 97), 문서가 로마숫자 번호
+        체계를 쓰면 그 문서에서는 로마숫자 헤더만 섹션 '시작'으로 인정한다.
+        단, 섹션 '종료' 판정은 번호 체계를 가리지 않는다 — 종료를 놓치면
+        섹션이 문서 끝까지 흐르는 큰 피해가 나지만, 조금 이르게 끊는 것은
+        피해가 작기 때문이다. (실제로 '1. 전문가의 확인'이 XI 섹션의 정당한
+        종료 헤더인 문서가 다수 있다)
+  3) 종료 헤더를 못 찾아도 성공으로 집계되어, 섹션이 문서 끝까지 흘러
+     재무제표 주석(K-IFRS)이 통째로 섞여 들어갔다.
+     -> require_terminator=True 면 종료 헤더가 없을 때 found=False 로 강등한다.
 """
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Iterable
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 from rapidfuzz import fuzz
 
+from src.parse.paragraphs import merge_short_paragraphs
 from src.utils.textnorm import clean_text, norm_name, split_paragraphs
 
 log = logging.getLogger(__name__)
 
-# 블록 경계로 취급할 태그. DART 원본의 커스텀 태그(section-1 등)도 포함.
-BLOCK_TAGS = {
-    "p", "div", "li", "ul", "ol", "dl", "dd", "dt",
-    "h1", "h2", "h3", "h4", "h5", "h6",
-    "td", "th", "tr", "tbody", "thead", "caption",
-    "section", "article", "center", "blockquote", "pre", "body",
-    "section-1", "section-2", "title", "document", "library",
+# 인라인 태그만 열거한다. 나머지 미지의 태그는 전부 '블록 컨테이너'로 보고
+# 재귀한다. DART 원문은 <TE>, <TU>, <TABLE-GROUP>, <SECTION-3>, <COVER> 등
+# 표준 HTML 에 없는 태그를 쓰므로 화이트리스트 방식은 반드시 실패한다.
+INLINE_TAGS = {
+    "span", "b", "i", "u", "em", "strong", "font", "a", "sub", "sup",
+    "small", "big", "strike", "s", "tt", "code", "label", "abbr", "mark",
+    "ins", "del", "q", "cite", "var", "kbd", "samp", "bdo", "wbr",
 }
-SKIP_TAGS = {"script", "style", "head", "meta", "link"}
+SKIP_TAGS = {"script", "style", "head", "meta", "link", "col", "colgroup"}
 INLINE_JOIN = " "
 
-# 사업보고서 최상위 섹션의 표준 이름 (연도별 표기 변형 포함).
-# 이 목록은 '경계 탐지'용이다. 진단 대상 4개는 config.yaml 의 sections 에서 온다.
-TOP_LEVEL_SECTION_NAMES: tuple[str, ...] = (
-    "회사의 개요",
-    "사업의 내용",
-    "재무에 관한 사항",
-    "이사의 경영진단 및 분석의견",
-    "감사인의 감사의견 등",
-    "회계감사인의 감사의견 등",
-    "이사회 등 회사의 기관에 관한 사항",
-    "주주에 관한 사항",
-    "임원 및 직원 등에 관한 사항",
-    "임원 및 직원에 관한 사항",
-    "계열회사 등에 관한 사항",
-    "이해관계자와의 거래내용",
-    "대주주 등과의 거래내용",
-    "그 밖에 투자자 보호를 위하여 필요한 사항",
-    "전문가의 확인",
-    "재무제표 등",
-    "부속명세서",
-    "상세표",
+# 사업보고서 표준 목차 전체. 이 중 '어느 것이든' 다음에 나오면 현재 섹션을 종료한다.
+# (P0-c Part 2-4). 연도별 표기 변형을 같은 항목으로 묶는다.
+TOP_LEVEL_SECTIONS: dict[str, tuple[str, ...]] = {
+    "회사의 개요": ("회사의 개요",),
+    "사업의 내용": ("사업의 내용",),
+    "재무에 관한 사항": ("재무에 관한 사항",),
+    "감사인의 감사의견 등": (
+        "감사인의 감사의견 등",
+        "회계감사인의 감사의견 등",
+        "감사인의 감사의견",
+    ),
+    "이사의 경영진단 및 분석의견": ("이사의 경영진단 및 분석의견",),
+    "이사회 등 회사의 기관에 관한 사항": (
+        "이사회 등 회사의 기관에 관한 사항",
+        "이사회 등 회사의 기관 및 계열회사에 관한 사항",
+    ),
+    "주주에 관한 사항": ("주주에 관한 사항",),
+    "임원 및 직원 등에 관한 사항": (
+        "임원 및 직원 등에 관한 사항",
+        "임원 및 직원에 관한 사항",
+    ),
+    "계열회사 등에 관한 사항": ("계열회사 등에 관한 사항",),
+    "이해관계자와의 거래내용": ("이해관계자와의 거래내용",),
+    "대주주 등과의 거래내용": ("대주주 등과의 거래내용",),
+    "그 밖에 투자자 보호를 위하여 필요한 사항": (
+        "그 밖에 투자자 보호를 위하여 필요한 사항",
+    ),
+    "재무제표 등": ("재무제표 등", "재무제표"),
+    "부속명세서": ("부속명세서",),
+    "전문가의 확인": ("전문가의 확인",),
+    "상세표": ("상세표",),
+}
+
+# 하위 호환: 기존 코드/테스트가 참조하던 평면 목록
+TOP_LEVEL_SECTION_NAMES: tuple[str, ...] = tuple(
+    v for variants in TOP_LEVEL_SECTIONS.values() for v in variants
 )
 
-_FUZZ_THRESHOLD = 92   # 정규화 후에도 남는 사소한 오타/변형 허용치
+_FUZZ_THRESHOLD = 97    # 정규화 후에도 남는 사소한 변형만 허용 (P0-c 에서 92 -> 97)
 _MAX_HEADER_CHARS = 60  # 헤더는 짧다. 이보다 길면 본문 문장으로 본다.
+_ROMAN_MIN_FOR_STRICT = 3   # 로마숫자 헤더가 이만큼 있으면 그 문서는 로마숫자 체계
+
+_ROMAN_PREFIX = re.compile(r"^\s*[\(\[<]?\s*([IVXLivxl]{1,7})\s*[\)\]>\.\-–—:]")
+_ARABIC_PREFIX = re.compile(r"^\s*[\(\[<]?\s*(\d{1,2})\s*[\)\]>\.\-–—:]")
+
+END_REASON_EOF = "EOF"
 
 
 @dataclass
@@ -64,6 +105,7 @@ class Block:
     kind: str          # "text" | "table"
     text: str
     html: str = ""
+    tag: str = ""      # 원본 태그명 (헤더 판정 보조)
 
 
 @dataclass
@@ -72,9 +114,13 @@ class SectionContent:
     name: str
     found: bool
     text: str = ""
+    paragraphs: list[str] = field(default_factory=list)
     tables_html: list[str] = field(default_factory=list)
     tables_text: str = ""
-    header_text: str = ""
+    start_header: str = ""
+    end_header: str = ""          # 종료 헤더 원문. 없으면 "" 이고 end_reason=="EOF"
+    end_reason: str = ""          # 종료시킨 표준 섹션명 또는 "EOF"
+    has_body: bool = False        # 시작 헤더는 찾았고 본문도 있었는가 (강등 전 상태)
 
     @property
     def char_len_text(self) -> int:
@@ -86,7 +132,7 @@ class SectionContent:
 
     @property
     def n_paragraphs(self) -> int:
-        return len(split_paragraphs(self.text))
+        return len(self.paragraphs)
 
 
 # --------------------------------------------------------------------------
@@ -94,6 +140,7 @@ class SectionContent:
 # --------------------------------------------------------------------------
 
 def iter_blocks(html: str, parser: str = "html.parser") -> list[Block]:
+    """문서를 블록 시퀀스로 평탄화한다. 표는 통째로 하나의 표 블록이 된다."""
     soup = BeautifulSoup(html, parser)
     for tag in soup.find_all(list(SKIP_TAGS)):
         tag.decompose()
@@ -105,6 +152,7 @@ def iter_blocks(html: str, parser: str = "html.parser") -> list[Block]:
 
 def _walk(node: Tag, out: list[Block]) -> None:
     pending: list[str] = []
+    tag_name = (node.name or "").lower()
 
     def flush() -> None:
         if not pending:
@@ -112,7 +160,7 @@ def _walk(node: Tag, out: list[Block]) -> None:
         t = clean_text(INLINE_JOIN.join(pending))
         pending.clear()
         if t:
-            out.append(Block("text", t))
+            out.append(Block("text", t, tag=tag_name))
 
     for child in node.children:
         if isinstance(child, NavigableString):
@@ -121,22 +169,27 @@ def _walk(node: Tag, out: list[Block]) -> None:
         if not isinstance(child, Tag):
             continue
         name = (child.name or "").lower()
+
         if name in SKIP_TAGS:
             continue
         if name == "table":
+            # 표는 어디에 묻혀 있든 여기서 떼어낸다. 절대 본문 텍스트로 흘리지 않는다.
             flush()
             out.append(
-                Block("table", clean_text(child.get_text(INLINE_JOIN)), str(child))
+                Block("table", clean_text(child.get_text(INLINE_JOIN)),
+                      html=str(child), tag="table")
             )
             continue
         if name == "br":
             flush()
             continue
-        if name in BLOCK_TAGS:
-            flush()
-            _walk(child, out)
+        if name in INLINE_TAGS:
+            pending.append(child.get_text(INLINE_JOIN))
             continue
-        pending.append(child.get_text(INLINE_JOIN))  # span, b, font, a ...
+
+        # 미지의 태그는 블록 컨테이너로 본다 (DART 커스텀 태그 대응).
+        flush()
+        _walk(child, out)
 
     flush()
 
@@ -146,11 +199,27 @@ def _walk(node: Tag, out: list[Block]) -> None:
 # --------------------------------------------------------------------------
 
 def _canonical_lookup() -> dict[str, str]:
-    return {norm_name(n): n for n in TOP_LEVEL_SECTION_NAMES}
+    """정규화된 변형 이름 -> 표준 섹션명."""
+    out: dict[str, str] = {}
+    for canonical, variants in TOP_LEVEL_SECTIONS.items():
+        for v in variants:
+            out[norm_name(v)] = canonical
+    return out
 
 
-def match_section_name(text: str, candidates: dict[str, str]) -> str | None:
+def numbering_style(text: str) -> str:
+    """헤더 원문의 번호 체계: 'roman' | 'arabic' | 'none'."""
+    if _ROMAN_PREFIX.match(text):
+        return "roman"
+    if _ARABIC_PREFIX.match(text):
+        return "arabic"
+    return "none"
+
+
+def match_section_name(text: str, candidates: dict[str, str] | None = None) -> str | None:
     """블록 텍스트가 최상위 섹션 헤더인지 판정하고, 표준 이름을 돌려준다."""
+    if candidates is None:
+        candidates = _canonical_lookup()
     if not text or len(text) > _MAX_HEADER_CHARS:
         return None
     key = norm_name(text)
@@ -163,42 +232,81 @@ def match_section_name(text: str, candidates: dict[str, str]) -> str | None:
         score = fuzz.ratio(key, cand_key)
         if score > best_score:
             best_name, best_score = cand_name, score
-    if best_score >= _FUZZ_THRESHOLD:
-        return best_name
-    return None
+    return best_name if best_score >= _FUZZ_THRESHOLD else None
 
 
-def find_headers(blocks: list[Block]) -> list[tuple[int, str, str]]:
-    """(블록 인덱스, 표준 섹션명, 원문 헤더 텍스트) 목록. 표 안의 헤더는 제외."""
+def find_all_header_candidates(blocks: list[Block]) -> list[tuple[int, str, str, str]]:
+    """표준 목차 이름과 일치하는 모든 블록: (인덱스, 표준명, 원문, 번호체계)."""
     candidates = _canonical_lookup()
-    headers: list[tuple[int, str, str]] = []
+    out: list[tuple[int, str, str, str]] = []
     for i, b in enumerate(blocks):
         if b.kind != "text":
             continue
         name = match_section_name(b.text, candidates)
         if name:
-            headers.append((i, name, b.text))
-    return headers
+            out.append((i, name, b.text, numbering_style(b.text)))
+    return out
+
+
+def find_headers(blocks: list[Block]) -> list[tuple[int, str, str]]:
+    """섹션 '시작'으로 인정할 최상위 헤더 목록.
+
+    문서가 로마숫자 번호 체계를 쓰면(로마숫자 헤더 >= 3개) 그 문서에서는
+    로마숫자 헤더만 최상위로 인정한다. '1. 회사의 개요' 같은 하위 소제목이
+    최상위로 오인되어 섹션을 잘못 자르는 것을 막는다.
+    """
+    raw = find_all_header_candidates(blocks)
+    n_roman = sum(1 for _, _, _, style in raw if style == "roman")
+    if n_roman >= _ROMAN_MIN_FOR_STRICT:
+        kept = [r for r in raw if r[3] == "roman"]
+        dropped = len(raw) - len(kept)
+        if dropped:
+            log.debug("로마숫자 체계 문서: 비로마 시작 헤더 후보 %d개 제외", dropped)
+        raw = kept
+    return [(i, name, text) for i, name, text, _ in raw]
+
+
+def find_terminators(blocks: list[Block]) -> list[tuple[int, str, str]]:
+    """섹션 '종료'로 인정할 헤더 목록 — 번호 체계를 가리지 않는다.
+
+    시작 헤더보다 기준을 넓게 잡는 이유: 종료 헤더를 놓치면 섹션이 문서 끝까지
+    흘러 재무제표 주석이 통째로 섞여 들어간다(피해 큼). 반대로 종료 헤더를
+    조금 이르게 잡으면 섹션이 약간 짧아질 뿐이다(피해 작음).
+    실제로 '1. 전문가의 확인'(아라비아 번호)이 XI 섹션의 정당한 종료 헤더인
+    문서가 다수 있는데, 로마숫자 전용 규칙은 이를 놓쳤다.
+    """
+    return [(i, name, text) for i, name, text, _ in find_all_header_candidates(blocks)]
 
 
 # --------------------------------------------------------------------------
 # 3) 섹션 추출
 # --------------------------------------------------------------------------
 
-def _spans_for(headers: list[tuple[int, str, str]], n_blocks: int, target: str
-               ) -> list[tuple[int, int, str]]:
-    """target 표준명에 해당하는 (start, end, header_text) 후보 구간들."""
+def _spans_for(headers: list[tuple[int, str, str]],
+               terminators: list[tuple[int, str, str]],
+               n_blocks: int, target: str
+               ) -> list[tuple[int, int, str, str, str]]:
+    """target 표준명 구간 후보: (start, end, 시작헤더, 종료헤더, 종료사유).
+
+    종료는 시작 이후에 나오는 첫 번째 '종료 후보'로 정한다. 시작 헤더 자신과
+    같은 블록은 제외한다.
+    """
     spans = []
-    for pos, (idx, name, htext) in enumerate(headers):
+    for idx, name, htext in headers:
         if name != target:
             continue
-        end = headers[pos + 1][0] if pos + 1 < len(headers) else n_blocks
-        spans.append((idx, end, htext))
+        nxt = next(((ti, tn, tt) for ti, tn, tt in terminators if ti > idx), None)
+        if nxt is None:
+            spans.append((idx, n_blocks, htext, "", END_REASON_EOF))
+        else:
+            end_idx, end_name, end_text = nxt
+            spans.append((idx, end_idx, htext, end_text, end_name))
     return spans
 
 
-def _collect(blocks: list[Block], start: int, end: int) -> tuple[str, list[str], str]:
-    """구간의 (본문텍스트, 표 HTML 목록, 표 텍스트)를 분리해서 모은다."""
+def _collect(blocks: list[Block], start: int, end: int
+             ) -> tuple[list[str], list[str], str]:
+    """구간의 (본문 문단 목록, 표 HTML 목록, 표 텍스트)를 분리해서 모은다."""
     texts, tables_html, tables_text = [], [], []
     for b in blocks[start + 1 : end]:
         if b.kind == "table":
@@ -206,8 +314,8 @@ def _collect(blocks: list[Block], start: int, end: int) -> tuple[str, list[str],
             if b.text:
                 tables_text.append(b.text)
         elif b.text:
-            texts.append(b.text)
-    return "\n".join(texts), tables_html, "\n".join(tables_text)
+            texts.extend(split_paragraphs(b.text))
+    return texts, tables_html, "\n".join(tables_text)
 
 
 def extract_sections(
@@ -215,40 +323,57 @@ def extract_sections(
     section_spec: dict[str, dict],
     *,
     parser: str = "html.parser",
+    require_terminator: bool = True,
+    merge_min_chars: int = 10,
 ) -> dict[str, SectionContent]:
     """config.yaml 의 sections 스펙대로 섹션을 뽑는다.
 
     section_spec: {"S1": {"name": "사업의 내용", "aliases": [...]}, ...}
+    require_terminator: 종료 헤더를 못 찾으면 found=False 로 강등한다.
+    merge_min_chars: 이보다 짧은 문단은 앞 문단에 병합한다 (0이면 병합 안 함).
     """
     blocks = iter_blocks(html, parser=parser)
     headers = find_headers(blocks)
+    terminators = find_terminators(blocks)
     n = len(blocks)
+    lookup = _canonical_lookup()
 
     out: dict[str, SectionContent] = {}
     for sid, spec in section_spec.items():
         names = [spec["name"], *spec.get("aliases", [])]
-        targets = {
-            match_section_name(nm, _canonical_lookup()) or nm for nm in names
-        }
-        spans: list[tuple[int, int, str]] = []
+        targets = {match_section_name(nm, lookup) or nm for nm in names}
+        spans: list[tuple[int, int, str, str, str]] = []
         for t in targets:
-            spans.extend(_spans_for(headers, n, t))
+            spans.extend(_spans_for(headers, terminators, n, t))
 
         if not spans:
-            out[sid] = SectionContent(sid, spec["name"], found=False)
+            out[sid] = SectionContent(sid, spec["name"], found=False,
+                                      end_reason="시작 헤더 없음")
             continue
 
         # 목차(TOC) 엔트리는 본문 길이가 0에 가깝다 -> 가장 긴 후보를 택한다.
         best = None
-        for start, end, htext in spans:
-            text, thtml, ttext = _collect(blocks, start, end)
-            score = len(text) + len(ttext)
+        for start, end, htext, end_text, end_reason in spans:
+            paras, thtml, ttext = _collect(blocks, start, end)
+            score = sum(len(p) for p in paras) + len(ttext)
             if best is None or score > best[0]:
-                best = (score, text, thtml, ttext, htext)
-        _, text, thtml, ttext, htext = best
+                best = (score, paras, thtml, ttext, htext, end_text, end_reason)
+        _, paras, thtml, ttext, htext, end_text, end_reason = best
+
+        if merge_min_chars:
+            paras = merge_short_paragraphs(paras, min_chars=merge_min_chars)
+        text = "\n".join(paras)
+
+        has_body = bool(text)
+        found = has_body
+        if require_terminator and end_reason == END_REASON_EOF:
+            found = False   # 종료 헤더를 못 찾았다 -> 문서 끝까지 흘렀을 가능성
+
         out[sid] = SectionContent(
-            sid, spec["name"], found=True,
-            text=text, tables_html=thtml, tables_text=ttext, header_text=htext,
+            sid, spec["name"], found=found,
+            text=text, paragraphs=paras, tables_html=thtml, tables_text=ttext,
+            start_header=htext, end_header=end_text, end_reason=end_reason,
+            has_body=has_body,
         )
     return out
 

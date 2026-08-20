@@ -13,6 +13,7 @@
   python -m src.pilot.p0b_change_diagnostics --mock
   python -m src.pilot.p0b_change_diagnostics
 """
+
 from __future__ import annotations
 
 import argparse
@@ -46,6 +47,7 @@ _STEM_RE = re.compile(r"^(?P<corp>[^_]+)_(?P<fy>\d{4})_(?P<sec>S\d+)$")
 # 로딩
 # ---------------------------------------------------------------------------
 
+
 def load_section_texts(pilot_dir: Path) -> pd.DataFrame:
     sec_dir = pilot_dir / "sections"
     if not sec_dir.exists():
@@ -59,34 +61,51 @@ def load_section_texts(pilot_dir: Path) -> pd.DataFrame:
         if not m:
             log.warning("파일명 규칙 불일치, 건너뜀: %s", p.name)
             continue
-        rows.append({
-            "corp_code": m["corp"],
-            "fy": int(m["fy"]),
-            "section": m["sec"],
-            "text": p.read_text(encoding="utf-8"),
-        })
+        rows.append(
+            {
+                "corp_code": m["corp"],
+                "fy": int(m["fy"]),
+                "section": m["sec"],
+                "text": p.read_text(encoding="utf-8"),
+            }
+        )
     df = pd.DataFrame(rows)
     if df.empty:
         raise SystemExit(f"{sec_dir} 에 섹션 텍스트가 없습니다.")
-    log.info("섹션 텍스트 %d건 로드 (기업 %d, 연도 %s)",
-             len(df), df["corp_code"].nunique(), sorted(df["fy"].unique()))
+    log.info(
+        "섹션 텍스트 %d건 로드 (기업 %d, 연도 %s)",
+        len(df),
+        df["corp_code"].nunique(),
+        sorted(df["fy"].unique()),
+    )
     return df
 
 
 def attach_names(df: pd.DataFrame, pilot_dir: Path) -> pd.DataFrame:
     idx_path = pilot_dir / "reports_index.csv"
+
     if not idx_path.exists():
         return df.assign(corp_name=df["corp_code"], market="", size_tier="")
+
     idx = pd.read_csv(idx_path, dtype={"stock_code": str})
+
     meta = idx.drop_duplicates("corp_code")[
         ["corp_code", "corp_name", "market", "size_tier"]
     ]
+
+    df = df.copy()
+    meta = meta.copy()
+
+    df["corp_code"] = df["corp_code"].astype(str).str.zfill(8)
+    meta["corp_code"] = meta["corp_code"].astype(str).str.zfill(8)
+
     return df.merge(meta, on="corp_code", how="left")
 
 
 # ---------------------------------------------------------------------------
 # 1) 인접 연도 쌍 유사도 3종
 # ---------------------------------------------------------------------------
+
 
 def compute_change_rates(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
     ngram = tuple(cfg["change"]["tfidf_char_ngram"])
@@ -108,26 +127,32 @@ def compute_change_rates(df: pd.DataFrame, cfg: Config) -> pd.DataFrame:
                 sim_jac = jaccard(a, b)
                 sim_lev = levenshtein_sim(a, b)
                 sim_dl = difflib_ratio(a, b)
-                out.append({
-                    "corp_code": corp, "section": section,
-                    "fy_prev": prev_fy, "fy_curr": curr_fy,
-                    "pair": f"{prev_fy}->{curr_fy}",
-                    "len_prev": len(a), "len_curr": len(b),
-                    "sim_tfidf_cos": sim_cos,
-                    "sim_jaccard": sim_jac,
-                    "sim_levenshtein": sim_lev,
-                    "sim_difflib": sim_dl,
-                    "change_tfidf_cos": 1 - sim_cos,
-                    "change_jaccard": 1 - sim_jac,
-                    "change_levenshtein": 1 - sim_lev,
-                    "change_difflib": 1 - sim_dl,
-                })
+                out.append(
+                    {
+                        "corp_code": corp,
+                        "section": section,
+                        "fy_prev": prev_fy,
+                        "fy_curr": curr_fy,
+                        "pair": f"{prev_fy}->{curr_fy}",
+                        "len_prev": len(a),
+                        "len_curr": len(b),
+                        "sim_tfidf_cos": sim_cos,
+                        "sim_jaccard": sim_jac,
+                        "sim_levenshtein": sim_lev,
+                        "sim_difflib": sim_dl,
+                        "change_tfidf_cos": 1 - sim_cos,
+                        "change_jaccard": 1 - sim_jac,
+                        "change_levenshtein": 1 - sim_lev,
+                        "change_difflib": 1 - sim_dl,
+                    }
+                )
     return pd.DataFrame(out)
 
 
 # ---------------------------------------------------------------------------
 # 3) 스파이크 진단
 # ---------------------------------------------------------------------------
+
 
 def spike_table(rates: pd.DataFrame, metric: str = "change_tfidf_cos") -> pd.DataFrame:
     """기업별 변화율을 기업 평균으로 표준화한 뒤 연도쌍 평균을 본다.
@@ -136,17 +161,22 @@ def spike_table(rates: pd.DataFrame, metric: str = "change_tfidf_cos") -> pd.Dat
     """
     df = rates.copy()
     firm_mean = df.groupby(["corp_code", "section"])[metric].transform("mean")
-    firm_std = df.groupby(["corp_code", "section"])[metric].transform("std").replace(0, np.nan)
+    firm_std = (
+        df.groupby(["corp_code", "section"])[metric].transform("std").replace(0, np.nan)
+    )
     df["demeaned"] = df[metric] - firm_mean
     df["zscore"] = df["demeaned"] / firm_std
     agg = (
         df.groupby(["section", "pair"])
-        .agg(n=("demeaned", "size"),
-             mean_change=(metric, "mean"),
-             mean_demeaned=("demeaned", "mean"),
-             mean_z=("zscore", "mean"),
-             share_positive=("demeaned", lambda s: float((s > 0).mean())))
-        .round(4).reset_index()
+        .agg(
+            n=("demeaned", "size"),
+            mean_change=(metric, "mean"),
+            mean_demeaned=("demeaned", "mean"),
+            mean_z=("zscore", "mean"),
+            share_positive=("demeaned", lambda s: float((s > 0).mean())),
+        )
+        .round(4)
+        .reset_index()
     )
     return agg
 
@@ -155,7 +185,10 @@ def spike_table(rates: pd.DataFrame, metric: str = "change_tfidf_cos") -> pd.Dat
 # 4) 기업 간 공통 변경 문단
 # ---------------------------------------------------------------------------
 
-def common_changed_paragraphs(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFrame, pd.DataFrame]:
+
+def common_changed_paragraphs(
+    df: pd.DataFrame, cfg: Config
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """연도쌍 x 섹션별로 added/modified 문단을 모아 MinHash 로 유사쌍을 찾는다.
 
     Returns: (상위 쌍 테이블, 연도쌍별 공통문단 수 집계)
@@ -169,11 +202,13 @@ def common_changed_paragraphs(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFra
     counts: list[dict[str, Any]] = []
 
     for (section,), sub in df.groupby(["section"]):
-        by_corp = {corp: g.set_index("fy")["text"].to_dict()
-                   for corp, g in sub.groupby("corp_code")}
+        by_corp = {
+            corp: g.set_index("fy")["text"].to_dict()
+            for corp, g in sub.groupby("corp_code")
+        }
         years = sorted(sub["fy"].unique())
         for prev_fy, curr_fy in zip(years, years[1:]):
-            items: list[tuple[str, str]] = []   # (corp_code, paragraph)
+            items: list[tuple[str, str]] = []  # (corp_code, paragraph)
             for corp, byyear in by_corp.items():
                 if prev_fy not in byyear or curr_fy not in byyear:
                     continue
@@ -184,9 +219,15 @@ def common_changed_paragraphs(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFra
                 items.extend((corp, p) for p in d.changed if len(p) >= min_chars)
 
             if len(items) < 2:
-                counts.append({"section": section, "pair": f"{prev_fy}->{curr_fy}",
-                               "n_changed_paragraphs": len(items),
-                               "n_common_pairs": 0, "n_corps_involved": 0})
+                counts.append(
+                    {
+                        "section": section,
+                        "pair": f"{prev_fy}->{curr_fy}",
+                        "n_changed_paragraphs": len(items),
+                        "n_common_pairs": 0,
+                        "n_corps_involved": 0,
+                    }
+                )
                 continue
 
             found = minhash_pairs(
@@ -196,23 +237,31 @@ def common_changed_paragraphs(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFra
                 threshold=float(c["minhash_threshold"]),
                 cross_group_only=True,
             )
-            corps_involved = {items[int(i)][0] for i, j, _ in found} | \
-                             {items[int(j)][0] for i, j, _ in found}
-            counts.append({
-                "section": section, "pair": f"{prev_fy}->{curr_fy}",
-                "n_changed_paragraphs": len(items),
-                "n_common_pairs": len(found),
-                "n_corps_involved": len(corps_involved),
-            })
+            corps_involved = {items[int(i)][0] for i, j, _ in found} | {
+                items[int(j)][0] for i, j, _ in found
+            }
+            counts.append(
+                {
+                    "section": section,
+                    "pair": f"{prev_fy}->{curr_fy}",
+                    "n_changed_paragraphs": len(items),
+                    "n_common_pairs": len(found),
+                    "n_corps_involved": len(corps_involved),
+                }
+            )
             for i, j, est in found[:max_stored]:
                 pi, pj = items[int(i)], items[int(j)]
-                pairs_rows.append({
-                    "section": section, "pair": f"{prev_fy}->{curr_fy}",
-                    "corp_a": pi[0], "corp_b": pj[0],
-                    "est_jaccard": round(est, 4),
-                    "para_a": pi[1][:300],
-                    "para_b": pj[1][:300],
-                })
+                pairs_rows.append(
+                    {
+                        "section": section,
+                        "pair": f"{prev_fy}->{curr_fy}",
+                        "corp_a": pi[0],
+                        "corp_b": pj[0],
+                        "est_jaccard": round(est, 4),
+                        "para_a": pi[1][:300],
+                        "para_b": pj[1][:300],
+                    }
+                )
 
     pairs_df = pd.DataFrame(pairs_rows)
     if not pairs_df.empty:
@@ -224,8 +273,10 @@ def common_changed_paragraphs(df: pd.DataFrame, cfg: Config) -> tuple[pd.DataFra
 # 그래프
 # ---------------------------------------------------------------------------
 
-def fig_change_by_year(rates: pd.DataFrame, out: Path,
-                       metric: str = "change_tfidf_cos") -> Path:
+
+def fig_change_by_year(
+    rates: pd.DataFrame, out: Path, metric: str = "change_tfidf_cos"
+) -> Path:
     g = rates.groupby(["section", "pair"])[metric].mean().reset_index()
     fig, ax = plt.subplots(figsize=(8, 5))
     for section, sub in g.groupby("section"):
@@ -248,8 +299,9 @@ def fig_common_paragraphs(counts: pd.DataFrame, out: Path) -> Path:
     if counts.empty:
         ax.text(0.5, 0.5, "데이터 없음", ha="center", va="center")
     else:
-        pivot = counts.pivot_table(index="pair", columns="section",
-                                   values="n_common_pairs", aggfunc="sum").fillna(0)
+        pivot = counts.pivot_table(
+            index="pair", columns="section", values="n_common_pairs", aggfunc="sum"
+        ).fillna(0)
         pivot = pivot.sort_index()
         x = np.arange(len(pivot.index))
         n_series = max(len(pivot.columns), 1)
@@ -273,13 +325,21 @@ def fig_common_paragraphs(counts: pd.DataFrame, out: Path) -> Path:
 # 리포트
 # ---------------------------------------------------------------------------
 
+
 def _md(df: pd.DataFrame) -> str:
     return df.to_markdown(index=False) + "\n" if not df.empty else "_(데이터 없음)_\n"
 
 
-def write_report(cfg: Config, rates: pd.DataFrame, spikes: pd.DataFrame,
-                 pairs: pd.DataFrame, counts: pd.DataFrame,
-                 out_dir: Path, *, mock: bool) -> Path:
+def write_report(
+    cfg: Config,
+    rates: pd.DataFrame,
+    spikes: pd.DataFrame,
+    pairs: pd.DataFrame,
+    counts: pd.DataFrame,
+    out_dir: Path,
+    *,
+    mock: bool,
+) -> Path:
     g0 = cfg["gate0"]
     top_n = int(cfg["change"]["top_pairs"])
     lines: list[str] = []
@@ -287,87 +347,123 @@ def write_report(cfg: Config, rates: pd.DataFrame, spikes: pd.DataFrame,
 
     add("# Phase 0 변화율 · 서식개정 스파이크 진단 (P0-b)\n")
     if mock:
-        add("> **경고 — MOCK 실행입니다.** 합성 데이터 결과이며 Gate 0 판정 근거가 아닙니다.\n")
-    add(f"- seed = {cfg['seed']}, 문자 {cfg['change']['tfidf_char_ngram'][0]}-gram TF-IDF")
-    add(f"- MinHash: num_perm={cfg['change']['minhash_num_perm']}, "
+        add(
+            "> **경고 — MOCK 실행입니다.** 합성 데이터 결과이며 Gate 0 판정 근거가 아닙니다.\n"
+        )
+    add(
+        f"- seed = {cfg['seed']}, 문자 {cfg['change']['tfidf_char_ngram'][0]}-gram TF-IDF"
+    )
+    add(
+        f"- MinHash: num_perm={cfg['change']['minhash_num_perm']}, "
         f"문자 {cfg['change']['minhash_ngram']}-gram, "
-        f"임계값 {cfg['change']['minhash_threshold']}")
+        f"임계값 {cfg['change']['minhash_threshold']}"
+    )
     add("")
 
     add("## 1. 연도쌍 x 섹션별 변화율 분포 (D1)\n")
     dist = (
         rates.groupby(["section", "pair"])
-        .agg(n=("change_tfidf_cos", "size"),
-             cos_mean=("change_tfidf_cos", "mean"),
-             cos_median=("change_tfidf_cos", "median"),
-             cos_q25=("change_tfidf_cos", lambda s: s.quantile(0.25)),
-             cos_q75=("change_tfidf_cos", lambda s: s.quantile(0.75)),
-             jac_median=("change_jaccard", "median"),
-             lev_median=("change_levenshtein", "median"))
-        .round(4).reset_index()
+        .agg(
+            n=("change_tfidf_cos", "size"),
+            cos_mean=("change_tfidf_cos", "mean"),
+            cos_median=("change_tfidf_cos", "median"),
+            cos_q25=("change_tfidf_cos", lambda s: s.quantile(0.25)),
+            cos_q75=("change_tfidf_cos", lambda s: s.quantile(0.75)),
+            jac_median=("change_jaccard", "median"),
+            lev_median=("change_levenshtein", "median"),
+        )
+        .round(4)
+        .reset_index()
     )
     dist["IQR"] = (dist["cos_q75"] - dist["cos_q25"]).round(4)
     add(_md(dist))
 
     med = float(rates["change_tfidf_cos"].median()) if not rates.empty else 0.0
     ok = med >= g0["change_rate_median_min"]
-    add(f"- 전체 변화율 중앙값 **{med:.3f}** "
-        f"(기준 {g0['change_rate_median_min']}) → {'통과' if ok else '미달'}\n")
+    add(
+        f"- 전체 변화율 중앙값 **{med:.3f}** "
+        f"(기준 {g0['change_rate_median_min']}) → {'통과' if ok else '미달'}\n"
+    )
 
     add("## 2. 서식개정 스파이크 진단 (D2)\n")
-    add("기업별 변화율을 기업 평균으로 표준화(demean)한 뒤 연도쌍 평균을 본다. "
-        "특정 연도에 전 기업이 동시에 상승했다면 `mean_demeaned` 가 뚜렷한 양수가 된다.\n")
+    add(
+        "기업별 변화율을 기업 평균으로 표준화(demean)한 뒤 연도쌍 평균을 본다. "
+        "특정 연도에 전 기업이 동시에 상승했다면 `mean_demeaned` 가 뚜렷한 양수가 된다.\n"
+    )
     add(_md(spikes))
 
-    n_pairs_per_firm = int(
-        rates.groupby(["corp_code", "section"]).size().max()
-    ) if not rates.empty else 0
+    n_pairs_per_firm = (
+        int(rates.groupby(["corp_code", "section"]).size().max())
+        if not rates.empty
+        else 0
+    )
     if n_pairs_per_firm < 3:
-        add(f"> **주의 — 이 통계는 현재 표본에서 검정력이 없습니다.** 기업당 인접 연도쌍이 "
+        add(
+            f"> **주의 — 이 통계는 현재 표본에서 검정력이 없습니다.** 기업당 인접 연도쌍이 "
             f"{n_pairs_per_firm}개뿐이라, 기업 평균으로 demean 하면 두 쌍의 값이 "
             f"부호만 반대인 같은 크기가 되어 스파이크가 서로 상쇄됩니다. 게다가 3개 연도 "
             f"표본(2016/2020/2024)에서는 2020년에 삽입된 서식 문구가 "
-            f"`2016->2020`(추가)과 `2020->2024`(삭제)의 변화율을 동시에 끌어올립니다.\n")
-        add("> 따라서 D2 판정은 아래 **3절(기업 간 공통 변경 문단)** 을 1차 근거로 삼으세요. "
+            f"`2016->2020`(추가)과 `2020->2024`(삭제)의 변화율을 동시에 끌어올립니다.\n"
+        )
+        add(
+            "> 따라서 D2 판정은 아래 **3절(기업 간 공통 변경 문단)** 을 1차 근거로 삼으세요. "
             "demean 기반 스파이크 검정은 Phase 1에서 연속 연도 패널을 확보한 뒤 "
-            "다시 수행합니다.\n")
+            "다시 수행합니다.\n"
+        )
     elif not spikes.empty:
         top = spikes.sort_values("mean_demeaned", ascending=False).iloc[0]
-        add(f"- 가장 강한 상승: **{top['pair']} / {top['section']}** "
+        add(
+            f"- 가장 강한 상승: **{top['pair']} / {top['section']}** "
             f"(demeaned {top['mean_demeaned']:+.4f}, "
-            f"상승 기업 비율 {top['share_positive']:.0%})\n")
+            f"상승 기업 비율 {top['share_positive']:.0%})\n"
+        )
 
     add("## 3. 기업 간 공통 변경 문단 (서식 개정의 직접 증거)\n")
-    add("서로 다른 기업의 added/modified 문단을 모아 문자 "
+    add(
+        "서로 다른 기업의 added/modified 문단을 모아 문자 "
         f"{cfg['change']['minhash_ngram']}-gram MinHash 로 유사도 "
         f"{cfg['change']['minhash_threshold']} 이상인 쌍을 찾는다. "
-        "같은 기업 내부의 쌍은 제외한다.\n")
+        "같은 기업 내부의 쌍은 제외한다.\n"
+    )
     add(_md(counts))
-    add(f"_`common_paragraphs.csv` 에는 (섹션 x 연도쌍)당 최대 "
+    add(
+        f"_`common_paragraphs.csv` 에는 (섹션 x 연도쌍)당 최대 "
         f"{cfg['change']['max_pairs_stored']}쌍만 저장한다. 위 표의 `n_common_pairs` 는 "
-        f"자르기 전 전체 개수다._\n")
+        f"자르기 전 전체 개수다._\n"
+    )
     add(f"### 상위 {top_n}개 유사쌍\n")
     if pairs.empty:
         add("_기업 간 거의 동일한 변경 문단이 발견되지 않았습니다._\n")
-        add("→ 스파이크가 없다면 **Phase 5(Template Filter)를 축소**할 수 있습니다. "
-            "다만 이 경우 논문의 방법론 기여 하나가 사라집니다.\n")
+        add(
+            "→ 스파이크가 없다면 **Phase 5(Template Filter)를 축소**할 수 있습니다. "
+            "다만 이 경우 논문의 방법론 기여 하나가 사라집니다.\n"
+        )
     else:
         show = pairs.head(top_n)[
             ["section", "pair", "corp_a", "corp_b", "est_jaccard", "para_a"]
         ].copy()
         show["para_a"] = show["para_a"].str.slice(0, 120) + "…"
         add(_md(show))
-        add("→ 기업 간 공통 변경 문단이 관측되었습니다. "
-            "**Phase 5(Template Filter)의 필요성이 입증**됩니다.\n")
+        add(
+            "→ 기업 간 공통 변경 문단이 관측되었습니다. "
+            "**Phase 5(Template Filter)의 필요성이 입증**됩니다.\n"
+        )
 
     add("## 4. Gate 0 관련 판정\n")
-    checks = pd.DataFrame([
-        {"항목": f"변화율 중앙값 {g0['change_rate_median_min']} 이상",
-         "결과": "PASS" if ok else "FAIL", "값": f"{med:.3f}"},
-        {"항목": "기업 간 공통 변경 문단 관측",
-         "결과": "PASS" if not pairs.empty else "FAIL",
-         "값": f"{len(pairs)}쌍"},
-    ])
+    checks = pd.DataFrame(
+        [
+            {
+                "항목": f"변화율 중앙값 {g0['change_rate_median_min']} 이상",
+                "결과": "PASS" if ok else "FAIL",
+                "값": f"{med:.3f}",
+            },
+            {
+                "항목": "기업 간 공통 변경 문단 관측",
+                "결과": "PASS" if not pairs.empty else "FAIL",
+                "값": f"{len(pairs)}쌍",
+            },
+        ]
+    )
     add(_md(checks))
     add("![연도별 평균 변화율](fig1_change_by_year.png)\n")
     add("![기업 간 공통 변경 문단](fig2_common_paragraphs.png)\n")
@@ -381,6 +477,7 @@ def write_report(cfg: Config, rates: pd.DataFrame, spikes: pd.DataFrame,
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Phase 0 변화율/스파이크 진단 (P0-b)")
@@ -409,7 +506,9 @@ def main(argv: list[str] | None = None) -> int:
     spikes = spike_table(rates)
     pairs, counts = common_changed_paragraphs(df, cfg)
     pairs.to_csv(out_dir / "common_paragraphs.csv", index=False, encoding="utf-8-sig")
-    counts.to_csv(out_dir / "common_paragraph_counts.csv", index=False, encoding="utf-8-sig")
+    counts.to_csv(
+        out_dir / "common_paragraph_counts.csv", index=False, encoding="utf-8-sig"
+    )
 
     fig_change_by_year(rates, out_dir / "fig1_change_by_year.png")
     fig_common_paragraphs(counts, out_dir / "fig2_common_paragraphs.png")
