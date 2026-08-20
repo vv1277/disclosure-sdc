@@ -153,6 +153,30 @@ def year_end_trading_day(year: int) -> str:
     return days[-1].strftime("%Y%m%d")
 
 
+_NAME_CACHE: dict[str, str] | None = None
+
+
+def _name_lookup() -> dict[str, str]:
+    """종목코드 -> 종목명. 상장·폐지 목록을 합쳐 한 번만 만든다.
+
+    KRX 의 `get_market_ticker_name` 은 종목당 1회 호출이라 10개 연도 x 2,700종목
+    이면 27,000회가 된다. FDR 목록으로 대부분 해결하고, 빠진 것만 KRX 에 묻는다.
+    """
+    global _NAME_CACHE
+    if _NAME_CACHE is not None:
+        return _NAME_CACHE
+    try:
+        cur, dead = load_listing_tables()
+        m = dict(zip(cur["Code"].astype(str), cur["Name"].astype(str)))
+        m.update(dict(zip(dead["Symbol"].astype(str), dead["Name"].astype(str))))
+    except Exception as exc:
+        log.warning("종목명 조회표 생성 실패, KRX 개별 호출로 대체합니다: %s", exc)
+        m = {}
+    _NAME_CACHE = m
+    log.info("종목명 조회표 %d건", len(m))
+    return m
+
+
 def _compile_exclusions(patterns: list[str]) -> list[re.Pattern]:
     return [re.compile(p) for p in patterns]
 
@@ -220,6 +244,7 @@ def snapshot(year: int, cfg: Config) -> pd.DataFrame:
     stock = _pykrx()
     date = year_end_trading_day(year)
     excl = _compile_exclusions(p1["exclude_name_patterns"])
+    names = _name_lookup()          # 종목당 KRX 호출을 피하려고 한 번에 만든다
 
     frames = []
     for market in p1["markets"]:
@@ -232,7 +257,7 @@ def snapshot(year: int, cfg: Config) -> pd.DataFrame:
 
         rows: list[dict[str, Any]] = []
         for t in tickers:
-            name = stock.get_market_ticker_name(t)
+            name = names.get(t) or stock.get_market_ticker_name(t)
             mcap = int(cap.loc[t, "시가총액"]) if t in cap.index else 0
             excluded = None
             if t in fin:
@@ -284,22 +309,31 @@ def build_universe(cfg: Config, years: list[int] | None = None,
     if not snaps:
         return pd.DataFrame()
 
-    # 생존편향 검증용: 이후 연도 스냅샷에서 사라진 종목을 표시한다.
+    # 생존편향 검증용 — 실제 상장폐지일로 판정한다.
+    #
+    # 주의: '다음 연도 유니버스에 없다' 로 판정하면 안 된다. 유니버스는 시총
+    # 상위 800개라, 순위에서 밀려난 것과 상장폐지된 것이 구분되지 않는다.
+    # 실제로 그렇게 셌더니 2015년 폐지비율이 45%로 나왔다 (정상 회전율일 뿐).
+    # KRX 상장폐지 목록의 DelistingDate 를 붙여 스냅샷 시점 이후 폐지된
+    # 종목만 True 로 둔다.
+    try:
+        _, dead = load_listing_tables()
+        delist = (dead.dropna(subset=["DelistingDate"])
+                  .sort_values("DelistingDate")
+                  .drop_duplicates("Symbol")
+                  .set_index("Symbol")["DelistingDate"])
+    except Exception as exc:
+        log.error("상장폐지 목록을 읽지 못했습니다. 생존편향 검증 불가: %s", exc)
+        delist = pd.Series(dtype="datetime64[ns]")
+
     all_years = sorted(snaps)
-    last_year = all_years[-1]
-    latest_codes = set(snaps[last_year]["stock_code"])
     out = []
     for y in all_years:
         df = snaps[y].copy()
-        later = set()
-        for y2 in all_years:
-            if y2 > y:
-                later |= set(snaps[y2]["stock_code"])
-        # 마지막 연도 이후는 알 수 없으므로 마지막 연도는 판정하지 않는다
-        df["is_delisted_later"] = (
-            (~df["stock_code"].isin(latest_codes)) & (y < last_year)
-            if y < last_year else False
-        )
+        snap_ts = pd.Timestamp(str(df["snapshot_date"].iloc[0]))
+        df["delist_date"] = df["stock_code"].map(delist)
+        df["is_delisted_later"] = df["delist_date"].notna() & (
+            df["delist_date"] > snap_ts)
         df["last_seen_fy"] = df["stock_code"].map(
             lambda c: max((yy for yy in all_years
                            if c in set(snaps[yy]["stock_code"])), default=y))

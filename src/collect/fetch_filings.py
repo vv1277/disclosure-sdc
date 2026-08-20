@@ -138,9 +138,22 @@ def build_index(cfg: Config, universe: pd.DataFrame, client: DartClient,
                 "period_month": chosen["period_month"],
             })
 
-    idx = pd.DataFrame(rows, columns=INDEX_COLUMNS)
-    out = PROJECT_ROOT / p1["paths"]["meta"] / "filings_index.parquet"
-    out.parent.mkdir(parents=True, exist_ok=True)
+    idx_all = pd.DataFrame(rows, columns=INDEX_COLUMNS)
+    meta = PROJECT_ROOT / p1["paths"]["meta"]
+    meta.mkdir(parents=True, exist_ok=True)
+    idx_all.to_parquet(meta / "filings_index_all.parquet", index=False)
+
+    # 기업당 1회 검색이라 검색 결과에는 '그 연도에 유니버스가 아니었던' 문서까지
+    # 들어온다. 유니버스는 연도별 시총 상위 N 이므로 (corp_code, fy) 로 걸러야
+    # 한다. 거르지 않으면 필요 없는 문서를 40% 넘게 더 받는다.
+    keys = set(zip(universe["corp_code"].astype(str),
+                   universe["fy"].astype(int)))
+    mask = [(c, int(f)) in keys for c, f in zip(idx_all["corp_code"], idx_all["fy"])]
+    idx = idx_all[mask].reset_index(drop=True)
+    log.info("검색 결과 %d건 -> 유니버스 필터 후 %d건 (제외 %d)",
+             len(idx_all), len(idx), len(idx_all) - len(idx))
+
+    out = meta / "filings_index.parquet"
     idx.to_parquet(out, index=False)
     log.info("filings_index 저장 -> %s (%d행)", out, len(idx))
     return idx
