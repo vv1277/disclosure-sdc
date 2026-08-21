@@ -248,3 +248,36 @@ def test_parser_fingerprint_covers_whole_parse_path(tmp_path, monkeypatch):
 def test_parser_fingerprint_is_stable_without_changes():
     import src.pilot.parse_cache as pc
     assert pc.parser_fingerprint() == pc.parser_fingerprint()
+
+
+# ---------------------------------------------------------------------------
+# 하위 소제목이 섹션명을 반복하면 섹션이 즉시 끊긴다 (전량 파싱에서 발견)
+# ---------------------------------------------------------------------------
+
+SELF_REPEAT_DOC = """<html><body>
+  <p>I. 회사의 개요</p><p>개요</p>
+  <p>IV. 이사의 경영진단 및 분석의견</p><p>경영진단</p>
+  <p>II. 사업의 내용</p>
+  <p>1. 사업의 내용</p>
+  <p>당사는 목재 가공업을 영위합니다. 이 문장이 본문이어야 합니다.</p>
+  <p>III. 재무에 관한 사항</p><p>재무</p>
+</body></html>"""
+
+
+def test_section_is_not_terminated_by_its_own_name():
+    """'II. 사업의 내용' 바로 아래 '1. 사업의 내용' 이 오는 서식이 있다.
+
+    종료 판정이 번호 체계를 가리지 않으므로 이 소제목이 섹션을 즉시 끊었다.
+    7,900건 중 67건이 그렇게 잘렸고 18건은 본문이 0자가 됐다.
+    """
+    s1 = extract_sections(SELF_REPEAT_DOC, SPEC)["S1"]
+    assert s1.found is True
+    assert s1.char_len_text > 0, "자기 이름 소제목이 섹션을 즉시 끊었다"
+    assert "목재 가공업" in s1.text
+    assert s1.end_reason == "재무에 관한 사항"
+
+
+def test_other_section_name_still_terminates():
+    """자기 이름만 예외다. 다른 표준 섹션명은 여전히 종료시킨다."""
+    s1 = extract_sections(SELF_REPEAT_DOC, SPEC)["S1"]
+    assert "재무" not in s1.text.replace("재무에 관한 사항", "")

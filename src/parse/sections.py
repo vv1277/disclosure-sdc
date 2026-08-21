@@ -316,14 +316,20 @@ def _spans_for(headers: list[tuple[int, str, str]],
                ) -> list[tuple[int, int, str, str, str]]:
     """target 표준명 구간 후보: (start, end, 시작헤더, 종료헤더, 종료사유).
 
-    종료는 시작 이후에 나오는 첫 번째 '종료 후보'로 정한다. 시작 헤더 자신과
-    같은 블록은 제외한다.
+    종료는 시작 이후에 나오는 첫 번째 '종료 후보'로 정한다.
+
+    **자기 이름과 같은 헤더로는 종료하지 않는다.** 하위 소제목이 섹션명을
+    그대로 반복하는 서식이 있다 ('II. 사업의 내용' 바로 아래 '1. 사업의 내용').
+    종료 판정이 번호 체계를 가리지 않으므로(P0-c 에서 그렇게 정했다) 이런
+    소제목이 섹션을 즉시 끊어 버린다. 실제로 7,900건 중 67건이 그렇게 잘렸고,
+    18건은 본문 0자, 49건은 중앙값 747자만 남았다.
     """
     spans = []
     for idx, name, htext in headers:
         if name != target:
             continue
-        nxt = next(((ti, tn, tt) for ti, tn, tt in terminators if ti > idx), None)
+        nxt = next(((ti, tn, tt) for ti, tn, tt in terminators
+                    if ti > idx and tn != target), None)
         if nxt is None:
             spans.append((idx, n_blocks, htext, "", END_REASON_EOF))
         else:
