@@ -106,6 +106,26 @@ class Block:
     text: str
     html: str = ""
     tag: str = ""      # 원본 태그명 (헤더 판정 보조)
+    index: int = -1    # 문서 내 블록 순번 (표를 떼어내도 원래 위치를 안다)
+
+
+@dataclass
+class TableRef:
+    """섹션에서 떼어낸 표 하나. 원래 위치와 캡션을 함께 들고 있는다.
+
+    표를 본문에서 분리하면 '표 제목만 남은 문단' 이 고아가 된다. 나중에
+    소송 표처럼 캡션으로 표를 식별해야 할 때 이 연결이 없으면 불가능하다.
+    """
+    block_index: int          # 문서 내 블록 순번
+    order_in_section: int     # 섹션 안에서 몇 번째 표인가
+    html: str
+    text: str
+    caption: str = ""         # 표 직전 텍스트 블록 (짧을 때만)
+    caption_block_index: int = -1
+
+    @property
+    def n_chars(self) -> int:
+        return len(self.text)
 
 
 @dataclass
@@ -117,6 +137,8 @@ class SectionContent:
     paragraphs: list[str] = field(default_factory=list)
     tables_html: list[str] = field(default_factory=list)
     tables_text: str = ""
+    tables: list["TableRef"] = field(default_factory=list)
+    paragraph_indices: list[int] = field(default_factory=list)
     start_header: str = ""
     end_header: str = ""          # 종료 헤더 원문. 없으면 "" 이고 end_reason=="EOF"
     end_reason: str = ""          # 종료시킨 표준 섹션명 또는 "EOF"
@@ -147,6 +169,8 @@ def iter_blocks(html: str, parser: str = "html.parser") -> list[Block]:
     root = soup.body or soup
     out: list[Block] = []
     _walk(root, out)
+    for i, b in enumerate(out):
+        b.index = i          # 표를 떼어내도 원래 위치를 알 수 있게 순번을 박아 둔다
     return out
 
 
@@ -304,18 +328,39 @@ def _spans_for(headers: list[tuple[int, str, str]],
     return spans
 
 
+CAPTION_MAX_CHARS = 120     # 이보다 길면 캡션이 아니라 본문 문단으로 본다
+
+
 def _collect(blocks: list[Block], start: int, end: int
-             ) -> tuple[list[str], list[str], str]:
-    """구간의 (본문 문단 목록, 표 HTML 목록, 표 텍스트)를 분리해서 모은다."""
-    texts, tables_html, tables_text = [], [], []
+             ) -> tuple[list[str], list[int], list[TableRef], str]:
+    """구간을 (본문 문단, 문단 블록 순번, 표 목록, 표 텍스트)로 분리한다.
+
+    표를 떼어낼 때 **직전 텍스트 블록이 짧으면 캡션으로 붙여 둔다**.
+    표를 분리하면 '표 제목만 남은 문단' 이 본문에 고아로 남는데, 그 연결을
+    잃으면 나중에 캡션으로 표를 식별할 수 없다 (소송 표가 그런 경우다).
+    """
+    texts: list[str] = []
+    para_idx: list[int] = []
+    tables: list[TableRef] = []
+    tables_text: list[str] = []
+    prev_text: Block | None = None
+
     for b in blocks[start + 1 : end]:
         if b.kind == "table":
-            tables_html.append(b.html)
+            cap, cap_idx = "", -1
+            if prev_text is not None and len(prev_text.text) <= CAPTION_MAX_CHARS:
+                cap, cap_idx = prev_text.text, prev_text.index
+            tables.append(TableRef(
+                block_index=b.index, order_in_section=len(tables),
+                html=b.html, text=b.text, caption=cap, caption_block_index=cap_idx))
             if b.text:
                 tables_text.append(b.text)
         elif b.text:
-            texts.extend(split_paragraphs(b.text))
-    return texts, tables_html, "\n".join(tables_text)
+            for p in split_paragraphs(b.text):
+                texts.append(p)
+                para_idx.append(b.index)
+            prev_text = b
+    return texts, para_idx, tables, "\n".join(tables_text)
 
 
 def extract_sections(
@@ -354,11 +399,11 @@ def extract_sections(
         # 목차(TOC) 엔트리는 본문 길이가 0에 가깝다 -> 가장 긴 후보를 택한다.
         best = None
         for start, end, htext, end_text, end_reason in spans:
-            paras, thtml, ttext = _collect(blocks, start, end)
+            paras, pidx, tabs, ttext = _collect(blocks, start, end)
             score = sum(len(p) for p in paras) + len(ttext)
             if best is None or score > best[0]:
-                best = (score, paras, thtml, ttext, htext, end_text, end_reason)
-        _, paras, thtml, ttext, htext, end_text, end_reason = best
+                best = (score, paras, pidx, tabs, ttext, htext, end_text, end_reason)
+        _, paras, pidx, tabs, ttext, htext, end_text, end_reason = best
 
         if merge_min_chars:
             paras = merge_short_paragraphs(paras, min_chars=merge_min_chars)
@@ -371,7 +416,9 @@ def extract_sections(
 
         out[sid] = SectionContent(
             sid, spec["name"], found=found,
-            text=text, paragraphs=paras, tables_html=thtml, tables_text=ttext,
+            text=text, paragraphs=paras,
+            tables_html=[t.html for t in tabs], tables_text=ttext, tables=tabs,
+            paragraph_indices=pidx,
             start_header=htext, end_header=end_text, end_reason=end_reason,
             has_body=has_body,
         )

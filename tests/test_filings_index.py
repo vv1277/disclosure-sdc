@@ -41,3 +41,26 @@ def test_original_preferred_over_correction():
     assert ch["rcept_no"] == "A"
     assert ch["is_correction"] is False
     assert ch["is_correction_exists"] is True
+
+
+def test_body_original_preferred_over_material_amendment_same_day():
+    """같은 날 기재정정·첨부정정·첨부추가가 함께 올라오는 경우가 있다.
+
+    한국단자공업 2016 이 그랬다 (셋 다 2017-03-31). 날짜만으로 정렬하면
+    기재정정본을 집을 수 있는데, 그건 본문이 바뀐 문서라 leakage 다.
+    첨부 계열은 본문이 원본 그대로이므로 그쪽을 택해야 한다.
+    """
+    rows = [_r("[기재정정]사업보고서 (2016.12)", "20170331", "A"),
+            _r("[첨부정정]사업보고서 (2016.12)", "20170331", "B"),
+            _r("[첨부추가]사업보고서 (2016.12)", "20170331", "C")]
+    ch = _pick_original(_annual_rows(rows, {2016}, True))
+    assert ch["report_type"] == "attachment_added"
+    assert ch["is_correction"] is False
+    assert ch["is_correction_exists"] is True     # 정정이 있었다는 사실은 남는다
+
+
+def test_plain_original_beats_attachment_added():
+    rows = [_r("[첨부추가]사업보고서 (2016.12)", "20170331", "C"),
+            _r("사업보고서 (2016.12)", "20170331", "D")]
+    ch = _pick_original(_annual_rows(rows, {2016}, True))
+    assert ch["rcept_no"] == "D" and ch["report_type"] == "original"

@@ -34,6 +34,8 @@ from src.collect.corp_code import build_mapping, parse_corp_code_zip
 from src.collect.dart_client import DartClient, MissingApiKey, NoData
 from src.collect.quota import QuotaExceeded
 from src.collect.report_select import is_amendment, period_year
+from src.collect.report_type import (
+    ATTACHMENT_ADDED, MATERIAL_AMENDMENT, ORIGINAL, classify_report)
 from src.collect.universe import attach_corp_code, build_universe
 from src.utils.config import PROJECT_ROOT, Config, load_config, set_seed
 from src.utils.failures import FailureLog
@@ -45,6 +47,11 @@ _PERIOD = re.compile(r"\((\d{4})\.(\d{1,2})\)")
 _TIME = re.compile(r"^\d{2}:?\d{2}$")
 # 사업보고서만. 제출기한연장신고서 등 유사 이름을 배제한다.
 _REPORT_NAME = re.compile(r"^사업보고서\s*\(")
+# config 를 못 받는 경로(테스트 등)용 기본값
+DEFAULT_REPORT_TYPES = {
+    MATERIAL_AMENDMENT: ["기재정정"],
+    ATTACHMENT_ADDED: ["첨부추가", "첨부정정", "첨부추가정정"],
+}
 
 INDEX_COLUMNS = [
     "corp_code", "stock_code", "corp_name", "market", "fy", "rcept_no",
@@ -85,14 +92,32 @@ def _annual_rows(rows: list[dict[str, Any]], years: set[int],
     return out
 
 
-def _pick_original(cands: list[dict[str, Any]]) -> dict[str, Any]:
-    """원본 우선. 정정본은 플래그만 남기고 텍스트를 소급 사용하지 않는다."""
-    originals = [c for c in cands if not c["is_correction"]]
-    pool = originals or cands
-    pool = sorted(pool, key=lambda c: str(c.get("rcept_dt", "")))
+_TYPE_RANK = {ORIGINAL: 0, ATTACHMENT_ADDED: 1, MATERIAL_AMENDMENT: 2}
+
+
+def _pick_original(cands: list[dict[str, Any]],
+                   rules: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    """본문이 원본인 문서를 고른다.
+
+    유형 우선순위(원본 > 첨부추가 > 기재정정)를 날짜보다 먼저 본다.
+    같은 날 세 건이 함께 올라오는 경우가 있어(한국단자공업 2016: 기재정정·
+    첨부정정·첨부추가가 모두 2017-03-31) 날짜만으로 정렬하면 기재정정본을
+    집을 수 있다. 첨부추가는 본문이 원본 그대로이므로 그쪽을 택해야 한다.
+    """
+    rules = rules or DEFAULT_REPORT_TYPES
+    enriched = []
+    for c in cands:
+        info = classify_report(c.get("report_nm", ""), rules)
+        enriched.append(dict(c, **info))
+
+    pool = sorted(enriched,
+                  key=lambda c: (_TYPE_RANK.get(c["report_type"], 9),
+                                 str(c.get("rcept_dt", ""))))
     chosen = dict(pool[0])
-    chosen["is_correction_exists"] = any(c["is_correction"] for c in cands)
-    chosen["orig_rcept_no"] = "" if originals else chosen["rcept_no"]
+    chosen["is_correction"] = chosen["report_type"] == MATERIAL_AMENDMENT
+    chosen["is_correction_exists"] = any(
+        c["report_type"] == MATERIAL_AMENDMENT for c in enriched)
+    chosen["orig_rcept_no"] = "" if not chosen["is_correction"] else chosen["rcept_no"]
     return chosen
 
 
@@ -129,7 +154,7 @@ def build_index(cfg: Config, universe: pd.DataFrame, client: DartClient,
         for a in annual:
             by_fy.setdefault(a["fy"], []).append(a)
         for fy, cands in by_fy.items():
-            chosen = _pick_original(cands)
+            chosen = _pick_original(cands, p1.get("report_types"))
             rows.append({
                 "corp_code": c.corp_code, "stock_code": c.stock_code,
                 "corp_name": c.corp_name, "market": c.market, "fy": fy,
