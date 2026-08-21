@@ -241,6 +241,9 @@ phase1:
     require_rcept_dt: true
     require_rcept_time: false
     require_idempotent_rerun: true        # 재실행 시 네트워크 호출 0건
+    # (변경) '문단당 10자 미만 비중 0' 이 아니라 '표 셀 파편에서 기인한
+    # 10자 미만 문단 0개'. 긴 문단 뒤에 오는 소제목은 정상으로 본다.
+    require_no_table_fragment_paragraphs: true
 
   # 사용자 요구 2) 편집기 잔재 제거 적용 + 제거 전 텍스트 병행 보관
   keep_raw_text: true                   # data/corpus/raw_text/ 에 제거 전 텍스트 보관
