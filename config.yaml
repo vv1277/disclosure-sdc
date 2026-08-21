@@ -186,6 +186,18 @@ phase1:
     - "리츠"
   december_fiscal_only: true
 
+  # 수집 범위 (Gate 3 페어링 요구로 재정의)
+  #   (기존) 유니버스 firm-year
+  #   (변경) 유니버스 firm-year **및 그 직전 연도**
+  # 유니버스를 매년 시총 상위 800 으로 재산정하면 '올해는 유니버스인데 작년에는
+  # 아니었던' 기업이 직전 연도 문서를 못 갖는다. 단순 결손이 아니라 선택편향이다
+  # — 신규 진입은 시총 급등 기업, 이탈은 급락 기업이므로 수익률 예측에서 가장
+  # 중요한 구간이 빠진다. 페어링률이 83.1% -> 95.6% 로 올라갔다.
+  collect_previous_year_for_pairing: true
+  # 추가 수집분은 sample_role='pair_only'. t-1 기준 문서로만 쓰이고 그 자체가
+  # 관측(t)이 되지 않는다. 학습 표본에 중복 투입하면 안 된다.
+  pair_only_index: data/meta/pair_only_index.parquet
+
   paths:
     filings: data/raw/filings           # {rcept_no}.zip
     prices: data/raw/prices
@@ -235,6 +247,7 @@ phase1:
   # Gate 1 통과 조건
   gate1:
     download_success_rate_min: 0.95
+    pairing_rate_min: 0.90               # Gate 3 — 직전 연도 문서 보유 비율
     require_delisted_in_universe: true    # 연도별 상폐 예정 기업이 0이면 버그
     # (변경) 접수'일자'가 전 건에 존재하고, 이벤트일 = 접수일 +1 거래일 규칙이
     # 코드에 강제되어 있을 것. 접수'시각'은 요구하지 않는다.

@@ -279,7 +279,11 @@ def main(argv: list[str] | None = None) -> int:
     set_seed(cfg)
 
     meta = PROJECT_ROOT / cfg["phase1"]["paths"]["meta"]
-    idx = pd.read_parquet(meta / "filings_index.parquet")
+    # pair_only 문서까지 포함한 인덱스가 있으면 그것을 쓴다.
+    # 페어링용 직전 연도 문서도 파싱해야 t-1 기준을 만들 수 있다.
+    with_pairs = meta / "filings_index_with_pairs.parquet"
+    idx = pd.read_parquet(with_pairs if with_pairs.exists()
+                          else meta / "filings_index.parquet")
     if args.limit:
         idx = idx.sort_values(["fy", "corp_code"], ascending=[False, True]).head(args.limit)
 

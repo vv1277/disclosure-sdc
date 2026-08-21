@@ -90,8 +90,12 @@ def demeaned_by_year(panel: pd.DataFrame) -> pd.DataFrame:
 # 2) 계단 탐지
 # --------------------------------------------------------------------------
 
-def yoy_steps(panel: pd.DataFrame, z_threshold: float = 1.5) -> pd.DataFrame:
-    """연도 간 log 차분의 횡단면 평균. 표본 평균에서 크게 벗어난 연도를 표시."""
+def yoy_steps(panel: pd.DataFrame, share_up: float = 0.75,
+              share_down: float = 0.25) -> pd.DataFrame:
+    """연도 간 log 차분의 횡단면 평균과 증가 기업 비율.
+
+    판정은 share_positive 로 한다 (z 는 보조 지표로만 병기).
+    """
     p = panel.sort_values(["corp_code", "section", "fy"]).copy()
     g = p.groupby(["corp_code", "section"])
     p["d_log"] = g["log_chars"].diff()
@@ -116,10 +120,14 @@ def yoy_steps(panel: pd.DataFrame, z_threshold: float = 1.5) -> pd.DataFrame:
         # 서식 개정은 항목이 **추가**될 때만 일어나지 않는다. 삭제되면 길이가
         # 한 해에 뚝 떨어진다. 실제로 S3 2021 이 z=-2.59, 증가 기업 비율 0.31 로
         # 강한 하락 계단인데, 상승만 보는 규칙으로는 놓친다.
-        sub["is_step_up"] = (sub["z_vs_own_history"] >= z_threshold) & (
-            sub["share_positive"] >= 0.65)
-        sub["is_step_down"] = (sub["z_vs_own_history"] <= -z_threshold) & (
-            sub["share_positive"] <= 0.35)
+        # 주 판정은 **합의(share_positive)** 로 한다. 크기(z)로 하면 안 된다.
+        #   - 가장 명확한 사례(S4 2018, 300개 중 144개가 동일 문장)가 z 는 가장
+        #     낮았다(1.78). S4 의 YoY 변동이 커서 분모가 부풀기 때문이다.
+        #   - 9개 연도쌍으로 계산한 z 는 표준편차 추정 자체가 불안정하다.
+        #   - 서식 개정의 서명은 크기가 아니라 합의다. 몇 개 기업이 대대적으로
+        #     다시 쓰면 평균 차분은 커져도 share_positive 는 0.5 근처다.
+        sub["is_step_up"] = sub["share_positive"] >= share_up
+        sub["is_step_down"] = sub["share_positive"] <= share_down
         sub["is_step"] = sub["is_step_up"] | sub["is_step_down"]
         sub["step_dir"] = np.where(sub["is_step_up"], "증가",
                                    np.where(sub["is_step_down"], "감소", ""))
@@ -131,10 +139,20 @@ def yoy_steps(panel: pd.DataFrame, z_threshold: float = 1.5) -> pd.DataFrame:
 # 3) 계단 연도의 신규 문단 중 기업 간 공통도 높은 것
 # --------------------------------------------------------------------------
 
-def new_common_paragraphs(cfg: Config, section: str, fy: int,
-                          top_n: int = 30, sample_n: int = 30,
-                          max_corps: int = 300) -> tuple[list, list, dict]:
-    """그 해 새로 등장한 문단 중 기업 간 공통도가 높은 것 상위 N + 무작위 N."""
+def changed_common_paragraphs(cfg: Config, section: str, fy: int,
+                              direction: str = "added",
+                              top_n: int = 30, sample_n: int = 30,
+                              max_corps: int = 300) -> tuple[list, list, dict]:
+    """계단 연도에 **바뀐** 문단 중 기업 간 공통도가 높은 것.
+
+    direction 을 계단 방향에 맞춰야 한다.
+      상승 계단 -> 'added'   (그 해 새로 들어온 문단)
+      하강 계단 -> 'deleted' (그 해 사라진 문단)
+
+    처음에 added 만 스캔했더니 하강 계단(S3 2021, S4 2021)에서 엉뚱한 것을
+    재고 있었다. 항목이 삭제되어 길이가 줄었는데 '새로 생긴 문단' 의 공통도를
+    본 셈이다.
+    """
     dirs = _paths(cfg)
     idx = pd.read_parquet(
         PROJECT_ROOT / cfg["phase1"]["paths"]["meta"] / "filings_index.parquet")
@@ -155,10 +173,12 @@ def new_common_paragraphs(cfg: Config, section: str, fy: int,
 
     items: list[tuple[str, str]] = []
     for c in corps:
-        new = _paras(cur[c]) - _paras(prev[c])
-        items.extend((c, p) for p in new)
+        a, b = _paras(cur[c]), _paras(prev[c])
+        changed = (a - b) if direction == "added" else (b - a)
+        items.extend((c, p) for p in changed)
 
-    stats = {"corps": len(corps), "new_paragraphs": len(items)}
+    stats = {"corps": len(corps), "direction": direction,
+             "changed_paragraphs": len(items)}
     if len(items) < 2:
         return [], [], stats
 
@@ -282,6 +302,22 @@ def main(argv: list[str] | None = None) -> int:
                    "share_positive", "z_vs_own_history", "step_dir"]]))
     add("![연도별 변화](fig_yoy_change_share_positive.png)\n")
 
+    add("### 이 진단의 적용 범위
+")
+    add("**길이 계단 탐지는 소형 섹션 전용 진단이다.** 섹션 크기에 반비례해 "
+        "민감하기 때문이다. 500자짜리 보일러플레이트가 들어오면 S4(평균 734자)"
+        "에서는 +68% 로 튀지만 S1(평균 15,476자)에서는 3% 라 YoY 변동성에 묻힌다. "
+        "S1 에서 계단이 안 잡히는 것은 개정이 없어서가 아니라 이 도구가 그 크기에서 "
+        "작동하지 않기 때문이다.
+")
+    add("반대 증거도 있다 — P0-d 에서 편집기 잔재 제거 후 남은 공통 문단 300쌍 중 "
+        "S1 2020→2024 가 94쌍이었다.
+")
+    add("> **S1 의 서식 개정 여부는 Phase 5 의 문단 단위 CommonRate 로 판정한다.** "
+        "길이 계단은 '현상이 존재하는가' 를 확인하는 진단이지 필터의 작동 원리가 "
+        "아니다. 두 층위를 섞으면 안 된다.
+")
+
     flagged = steps[steps["is_step"]].sort_values(["section", "fy"])
     add(f"### 계단으로 지목된 (섹션, 연도): {len(flagged)}건\n")
     add(_md(flagged[["section", "fy", "mean_d_log", "share_positive",
@@ -296,9 +332,13 @@ def main(argv: list[str] | None = None) -> int:
     add("> 상위만 보면 편향되므로 **무작위 표본 30개**를 함께 낸다.\n")
 
     for r in flagged.itertuples():
-        top, sample, st = new_common_paragraphs(cfg, r.section, int(r.fy))
+        direction = "added" if r.step_dir == "증가" else "deleted"
+        top, sample, st = changed_common_paragraphs(
+            cfg, r.section, int(r.fy), direction=direction)
+        label = "신규 등장" if direction == "added" else "삭제된"
         add(f"### {r.section} · {int(r.fy)}년 [{r.step_dir}] "
-            f"(기업 {st.get('corps', 0)}개, 신규 문단 {st.get('new_paragraphs', 0):,}개, "
+            f"(기업 {st.get('corps', 0)}개, {label} 문단 "
+            f"{st.get('changed_paragraphs', 0):,}개, "
             f"유사쌍 {st.get('pairs', 0):,})\n")
         if top:
             add("**공통도 상위 30**\n")
