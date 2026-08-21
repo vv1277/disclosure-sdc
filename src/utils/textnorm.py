@@ -41,16 +41,35 @@ _LEADING_NUM = re.compile(
 )
 
 
-def clean_text(s: str) -> str:
-    """본문 저장용 정규화. 내용은 보존하고 표기 노이즈만 제거한다."""
+def strip_artifacts(s: str) -> str:
+    """DART 편집기 잔재 3종만 제거한다.
+
+    잔재 제거 '전' 텍스트를 따로 보관해야 하므로(논문 Appendix A-11),
+    이 단계를 분리해 두고 나중에 적용할 수 있게 한다.
+    """
+    if not s:
+        return ""
+    s = _EDITOR_PLACEHOLDER.sub(" ", s)
+    s = _DSL_REF.sub(" ", s)
+    s = _DART_ENTITY.sub(" ", s)
+    return _MULTI_SPACE.sub(" ", s).strip()
+
+
+def clean_text(s: str, *, remove_artifacts: bool = True) -> str:
+    """본문 저장용 정규화. 내용은 보존하고 표기 노이즈만 제거한다.
+
+    remove_artifacts=False 면 편집기 잔재를 남긴다. 잔재 제거 전/후를
+    비교하려면 같은 파싱에서 두 버전을 뽑아야 하기 때문이다.
+    """
     if not s:
         return ""
     s = unicodedata.normalize("NFKC", s)
     s = s.translate(_INVISIBLE)
     s = _SPACE_LIKE.sub(" ", s)
-    s = _EDITOR_PLACEHOLDER.sub(" ", s)
-    s = _DSL_REF.sub(" ", s)
-    s = _DART_ENTITY.sub(" ", s)
+    if remove_artifacts:
+        s = _EDITOR_PLACEHOLDER.sub(" ", s)
+        s = _DSL_REF.sub(" ", s)
+        s = _DART_ENTITY.sub(" ", s)
     s = _FOOTNOTE.sub(" ", s)
     s = "\n".join(line.strip() for line in s.split("\n"))
     s = _MULTI_SPACE.sub(" ", s)

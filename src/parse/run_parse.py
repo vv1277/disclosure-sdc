@@ -40,7 +40,9 @@ import pandas as pd
 from tqdm import tqdm
 
 from src.parse.body import pick_body_file
-from src.parse.sections import END_REASON_EOF, extract_sections, iter_blocks
+from src.parse.paragraphs import merge_short_paragraphs
+from src.parse.sections import END_REASON_EOF, extract_sections
+from src.utils.textnorm import strip_artifacts
 from src.utils.config import PROJECT_ROOT, Config, load_config, set_seed
 from src.utils.logging_utils import setup_logging
 
@@ -55,6 +57,26 @@ ARTIFACT_PATTERNS = {
 
 # 레이아웃 표: 1~2행 또는 1열이면서 셀이 길다 -> 표가 아니라 서식용 껍데기
 LAYOUT_CELL_MIN_CHARS = 200
+
+
+# 문서 1건 파싱의 실측 최대 메모리(가장 큰 문서 기준). 워커 수를 이걸로 정한다.
+PEAK_MB_PER_DOC = 600
+
+
+def default_workers(reserve_gb: float = 1.5) -> int:
+    """가용 메모리로 워커 수를 정한다.
+
+    코어 수만 보고 정하면 안 된다. 17코어로 돌렸다가 MemoryError 가 났다.
+    이 작업은 CPU 가 아니라 메모리에 묶여 있다 (문서당 최대 480MB).
+    """
+    cores = max(1, (os.cpu_count() or 2) - 1)
+    try:
+        import psutil
+        free_gb = psutil.virtual_memory().available / 1e9
+    except Exception:
+        free_gb = 4.0                      # psutil 이 없으면 보수적으로
+    budget = max(1, int((free_gb - reserve_gb) * 1000 / PEAK_MB_PER_DOC))
+    return max(1, min(cores, budget))
 
 
 def _paths(cfg: Config) -> dict[str, Path]:
@@ -76,6 +98,44 @@ def _is_layout_table(html: str) -> bool:
     return any(len(c) >= LAYOUT_CELL_MIN_CHARS for r in grid for c in r)
 
 
+def _derive_clean(raw_secs: dict, merge_min_chars: int) -> dict:
+    """잔재를 남긴 추출 결과에서 정제본을 만든다.
+
+    잔재 제거는 문단 단위 문자열 치환이라 블록 경계를 바꾸지 않는다.
+    따라서 다시 파싱하지 않고 여기서 파생시켜도 결과가 같다
+    (tests/test_run_parse.py 가 이 동치를 고정한다).
+    """
+    from copy import copy
+
+    out = {}
+    for sid, sc in raw_secs.items():
+        keep_p, keep_i = [], []
+        for p, i in zip(sc.paragraphs, sc.paragraph_indices):
+            c = strip_artifacts(p)
+            if c:
+                keep_p.append(c)
+                keep_i.append(i)
+        if merge_min_chars:
+            merged = merge_short_paragraphs(keep_p, min_chars=merge_min_chars)
+            # 병합으로 문단 수가 줄면 위치는 각 병합 그룹의 첫 블록으로 맞춘다
+            keep_i = keep_i[:len(merged)] if len(merged) <= len(keep_i) else keep_i
+            keep_p = merged
+        new = copy(sc)
+        new.paragraphs = keep_p
+        new.paragraph_indices = keep_i
+        new.text = "\n".join(keep_p)
+        new.tables = [copy(t) for t in sc.tables]
+        for t in new.tables:
+            t.text = strip_artifacts(t.text)
+            t.caption = strip_artifacts(t.caption)
+        new.tables_text = "\n".join(t.text for t in new.tables if t.text)
+        new.tables_html = [t.html for t in new.tables]
+        new.has_body = bool(new.text)
+        new.found = sc.found and bool(new.text)
+        out[sid] = new
+    return out
+
+
 def parse_one(task: tuple[str, str, dict]) -> dict[str, Any]:
     """워커 진입점. 공유 상태 없이 자기 문서만 처리하고 자기 파일만 쓴다."""
     warnings.filterwarnings("ignore")
@@ -89,18 +149,21 @@ def parse_one(task: tuple[str, str, dict]) -> dict[str, Any]:
 
     spec = opt["sections"]
     try:
-        secs = extract_sections(
-            html, spec, parser=opt["parser"],
-            require_terminator=opt["require_terminator"],
-            merge_min_chars=opt["merge_min_chars"])
-        # 잔재 제거 '전' 텍스트: 병합·정제를 끄고 한 번 더 뽑는다
+        # **한 번만 파싱한다.** 잔재를 남긴 채로 뽑은 뒤, 정제본은 거기서 파생시킨다.
+        #   - 두 번 파싱하면 메모리와 시간이 두 배가 된다 (문서당 최대 480MB).
+        #   - 그리고 두 번 파싱하면 '잔재 제거 전' 이 실제로는 제거된 텍스트가 된다.
+        #     둘 다 clean_text 를 거치기 때문이다. 실제로 그 버그가 있었다.
         raw_secs = extract_sections(
             html, spec, parser=opt["parser"],
             require_terminator=opt["require_terminator"],
-            merge_min_chars=0) if opt["keep_raw_text"] else {}
+            merge_min_chars=0, remove_artifacts=False)
     except Exception as exc:
         out["error"] = f"section:{type(exc).__name__}:{exc}"
         return out
+    finally:
+        html = ""       # 4MB 문자열을 빨리 놓아준다
+
+    secs = _derive_clean(raw_secs, opt["merge_min_chars"])
 
     dirs = {k: Path(v) for k, v in opt["dirs"].items()}
     sec_payload, tbl_payload, raw_payload = {}, {}, {}
@@ -131,8 +194,9 @@ def parse_one(task: tuple[str, str, dict]) -> dict[str, Any]:
             "paragraph_indices": sc.paragraph_indices,
         }
         tbl_payload[sid] = tables
-        if raw_secs:
-            raw_payload[sid] = {"text": raw_secs[sid].text}
+        if opt["keep_raw_text"]:
+            raw_payload[sid] = {"text": raw_secs[sid].text,
+                                "n_paragraphs": len(raw_secs[sid].paragraphs)}
 
         diag[f"{sid}_found"] = bool(sc.found)
         diag[f"{sid}_chars"] = sc.char_len_text
@@ -219,7 +283,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit:
         idx = idx.sort_values(["fy", "corp_code"], ascending=[False, True]).head(args.limit)
 
-    workers = args.workers or max(1, (os.cpu_count() or 2) - 1)
+    workers = args.workers or default_workers()
+    log.info("워커 %d (코어 %s)", workers, os.cpu_count())
 
     if args.verify:
         return _verify(cfg, idx, dirs, workers)

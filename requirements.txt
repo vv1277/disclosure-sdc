@@ -26,4 +26,6 @@ tabulate>=0.9
 pykrx>=1.0.45
 finance-datareader>=0.9.90
 openpyxl>=3.1
+# Phase 2: memory-aware worker count for parallel parsing
+psutil>=5.9
 pytest>=8.2

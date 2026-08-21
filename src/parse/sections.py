@@ -37,7 +37,8 @@ from bs4 import BeautifulSoup, NavigableString, Tag
 from rapidfuzz import fuzz
 
 from src.parse.paragraphs import merge_short_paragraphs
-from src.utils.textnorm import clean_text, norm_name, split_paragraphs
+from src.utils.textnorm import (
+    clean_text, norm_name, split_paragraphs, strip_artifacts)
 
 log = logging.getLogger(__name__)
 
@@ -161,27 +162,28 @@ class SectionContent:
 # 1) HTML -> 블록 시퀀스
 # --------------------------------------------------------------------------
 
-def iter_blocks(html: str, parser: str = "html.parser") -> list[Block]:
+def iter_blocks(html: str, parser: str = "html.parser", *,
+                remove_artifacts: bool = True) -> list[Block]:
     """문서를 블록 시퀀스로 평탄화한다. 표는 통째로 하나의 표 블록이 된다."""
     soup = BeautifulSoup(html, parser)
     for tag in soup.find_all(list(SKIP_TAGS)):
         tag.decompose()
     root = soup.body or soup
     out: list[Block] = []
-    _walk(root, out)
+    _walk(root, out, remove_artifacts=remove_artifacts)
     for i, b in enumerate(out):
         b.index = i          # 표를 떼어내도 원래 위치를 알 수 있게 순번을 박아 둔다
     return out
 
 
-def _walk(node: Tag, out: list[Block]) -> None:
+def _walk(node: Tag, out: list[Block], *, remove_artifacts: bool = True) -> None:
     pending: list[str] = []
     tag_name = (node.name or "").lower()
 
     def flush() -> None:
         if not pending:
             return
-        t = clean_text(INLINE_JOIN.join(pending))
+        t = clean_text(INLINE_JOIN.join(pending), remove_artifacts=remove_artifacts)
         pending.clear()
         if t:
             out.append(Block("text", t, tag=tag_name))
@@ -200,7 +202,9 @@ def _walk(node: Tag, out: list[Block]) -> None:
             # 표는 어디에 묻혀 있든 여기서 떼어낸다. 절대 본문 텍스트로 흘리지 않는다.
             flush()
             out.append(
-                Block("table", clean_text(child.get_text(INLINE_JOIN)),
+                Block("table",
+                      clean_text(child.get_text(INLINE_JOIN),
+                                 remove_artifacts=remove_artifacts),
                       html=str(child), tag="table")
             )
             continue
@@ -213,7 +217,7 @@ def _walk(node: Tag, out: list[Block]) -> None:
 
         # 미지의 태그는 블록 컨테이너로 본다 (DART 커스텀 태그 대응).
         flush()
-        _walk(child, out)
+        _walk(child, out, remove_artifacts=remove_artifacts)
 
     flush()
 
@@ -370,6 +374,7 @@ def extract_sections(
     parser: str = "html.parser",
     require_terminator: bool = True,
     merge_min_chars: int = 10,
+    remove_artifacts: bool = True,
 ) -> dict[str, SectionContent]:
     """config.yaml 의 sections 스펙대로 섹션을 뽑는다.
 
@@ -377,7 +382,7 @@ def extract_sections(
     require_terminator: 종료 헤더를 못 찾으면 found=False 로 강등한다.
     merge_min_chars: 이보다 짧은 문단은 앞 문단에 병합한다 (0이면 병합 안 함).
     """
-    blocks = iter_blocks(html, parser=parser)
+    blocks = iter_blocks(html, parser=parser, remove_artifacts=remove_artifacts)
     headers = find_headers(blocks)
     terminators = find_terminators(blocks)
     n = len(blocks)
